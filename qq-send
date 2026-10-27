@@ -1,0 +1,65 @@
+#!/opt/qqbot/venv/bin/python
+"""给 DSH 用的出站命令行：往 QQ 群发一句话。
+
+用法：
+    qq-send <group_openid> "要发的内容"
+    echo "要发的内容" | qq-send <group_openid>
+    qq-send --groups                 列出最近有消息的群
+
+配置从 /opt/dsh-bot/config.ini 读 [send] token 与 [bot] port，只连 127.0.0.1。
+群 openid 可以从 --groups 拿到，也可以在机器人日志里看 `群回复 xxxxxxxx:` 前缀。
+"""
+
+import configparser
+import json
+import sys
+import urllib.request
+from pathlib import Path
+
+CONFIG = Path("/opt/dsh-bot/config.ini")
+
+
+def load():
+    cfg = configparser.ConfigParser()
+    if not cfg.read(CONFIG, encoding="utf-8"):
+        sys.exit(f"读不到配置：{CONFIG}")
+    port = cfg.getint("bot", "port", fallback=3704)
+    token = cfg.get("send", "token", fallback="").strip()
+    if not token:
+        sys.exit("配置里没有 [send] token")
+    return port, token
+
+
+def call(path, data=None):
+    port, token = load()
+    url = f"http://127.0.0.1:{port}{path}"
+    body = json.dumps(data, ensure_ascii=False).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method="POST" if data else "GET")
+    req.add_header("x-token", token)
+    if body:
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help"):
+        print(__doc__)
+        return
+    if args[0] in ("--groups", "-g"):
+        print(json.dumps(call("/groups"), ensure_ascii=False, indent=2))
+        return
+
+    group = args[0]
+    text = " ".join(args[1:]).strip() if len(args) > 1 else ""
+    if not text and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        sys.exit("没有内容可发")
+
+    print(json.dumps(call("/send", {"group": group, "text": text}), ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

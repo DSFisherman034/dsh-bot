@@ -1,0 +1,121 @@
+# DSH Bot
+
+一个会自己看群、挑时机说话的 QQ 群友。基于 [`botsns`](../qqbot/botsns)。
+
+- **webhook**：`https://dshbot.rantindom.com` → nginx :8443 → `127.0.0.1:3704`
+- **服务**：`dsh-bot.service`（systemd，用户 `dsfisherman`）
+- **解释器**：`/opt/qqbot/venv/bin/python`
+- **模型**：阿里云兼容端点 `deepseek-v4.1-flash-1017`（key 在 `config.ini`）
+
+## 结构
+
+| 文件 | 职责 | 改了要重启吗 |
+|---|---|---|
+| `main.py` | 编排：收消息、判断要不要理、发回复、心跳 | 要 |
+| `brain.py` | 提示词组装 + LLM 调用 + 输出清洗 | 要 |
+| `memory.py` | SQLite 群聊流水（7 天）与每群状态 | 要 |
+| `agent/AGENTS.md` | **主路径人设与输出纪律**（@/插话/心跳都走 DSH，下一轮自动生效） | 不要 |
+| `persona.md` | 兜底人设（DSH 桥挂掉时的本地模型、私信；改了立即生效） | 不要 |
+| `config.ini` | 凭据、模型、行为参数 | 要 |
+| `data.db` | 运行时数据库（自动创建，别手动改） | — |
+
+## 行为逻辑
+
+**被 @ / 私信** → 一定回复。
+**没被 @ 的群消息** → 进 `ambient_debounce` 秒合并窗口，窗口结束让模型自己决定说还是 SKIP（`reply_policy` 控制）。
+**群里安静** → 心跳每 `heartbeat_interval` 秒检查；群静了 `heartbeat_idle` 秒、且距上次机器人发言
+`heartbeat_cooldown` 秒以上，才让模型起个话头（同样可以 SKIP）。
+
+两种平台模式都支持：
+- 「接收全部消息」：事件是 `GROUP_MESSAGE_CREATE`，用 `mentions[].is_you` / 内容含名字判断；
+- 「仅 @ 时说话」：事件全是 `GROUP_AT_MESSAGE_CREATE`，直接当被 @。
+
+其他护栏：静音时段不说话；被 QQ 拒绝（无权限/频控）会给该群关掉主动性；
+等 1–4 秒再发，模拟打字。
+
+## 调参（config.ini）
+
+```ini
+[behavior]
+reply_policy = full         ; full：允许插话与心跳；mention_only：只回 @
+ambient_debounce = 10       ; 非 @ 消息的合并窗口（秒）
+heartbeat_interval = 120    ; 心跳检查间隔
+heartbeat_idle = 300        ; 群静多久才考虑自己开口
+heartbeat_cooldown = 600    ; 距上次机器人发言多久才允许开口
+quiet_hours = 01:30-08:00   ; 静音时段，留空关闭
+max_reply_chars = 300
+```
+
+**想让它更活跃**：调小 `ambient_debounce`（5）、`heartbeat_idle`（180）。
+**想让它更安静**：调大这些值，或把 `reply_policy` 改成 `mention_only`（只回 @）。
+
+## 调人设
+
+主路径（@、插话、心跳都走 DSH）的人设在 `agent/AGENTS.md`，改完**下一轮自动生效**，不用重启——
+DSH 每次请求前会重新读工作区的 AGENTS.md，把变更注入会话。
+
+`persona.md` 只剩兜底作用：DSH 桥挂掉时的本地模型、以及私信回复。它每次调用都查 mtime，改完立即生效。
+两份最好一起改，语气才一致，不然桥上桥下像两个人。
+
+当前人设：**小鲸鱼**（外号大肥鱼，2026-10-27 v0.28，见 `CHANGELOG.md`）。想快速试兜底那份：
+
+```bash
+cd /opt/dsh-bot && /opt/qqbot/venv/bin/python - <<'PY'
+import asyncio, sys, time; sys.path.insert(0, ".")
+from brain import Brain
+cfg = dict(base_url="...", api_key="...", model="deepseek-v4.1-flash-1017",
+           temperature=0.95, max_tokens=90, name="DSH")
+b = Brain(cfg, "persona.md")
+rows = [("小明", "这破服务器风扇吵死了", time.time()-60, 0)]
+print(asyncio.run(b.respond(rows, "addressed", "小明")))
+PY
+```
+
+## 运维
+
+```bash
+systemctl status dsh-bot
+journalctl -u dsh-bot -f                 # 看它每次说话/沉默的决策
+curl -s localhost:3704/health
+curl -s localhost:3704/stats             # 库里消息数/群数
+```
+
+改代码后的部署（**工作区里的 `~/dsh/dsh-bot` 是源码副本**）：
+
+```bash
+cd ~/dsh/dsh-bot
+sudo install -o dsfisherman -g dsfisherman -m 644 main.py brain.py memory.py persona.md README.md CHANGELOG.md /opt/dsh-bot/
+sudo install -o dsfisherman -g dsfisherman -m 600 config.ini /opt/dsh-bot/config.ini
+sudo install -o dsfisherman -g dsfisherman -m 600 agent/AGENTS.md /opt/dsh-bot/agent/AGENTS.md
+sudo systemctl restart dsh-bot
+```
+
+只改人设不用重启：`persona.md` 热读，`agent/AGENTS.md` 下一轮自动重载。
+
+
+## 出站口（给 DSH 用）
+
+```bash
+qq-send --groups                       # 看有哪些群
+qq-send <group_openid> "在吗"           # 发一句话
+echo "多行也行" | qq-send <group_openid>
+```
+
+底层是 `POST http://127.0.0.1:3704/send`，body `{"group": "...", "text": "..."}`，
+必须带 `x-token`（值在 `config.ini [send] token`）。token 是防止公网乱发的唯一屏障——
+这台机器的 nginx 把整个域名反代到 3704，`/send` 公网可达，所以**别把 token 贴到聊天记录里**。
+
+## 排障
+
+| 现象 | 看什么 |
+|---|---|
+| 群里完全没反应 | 平台回调地址；`journalctl` 有没有 POST；两种模式是否设置对了 |
+| 有 POST 但没回复 | 日志里 `决定插话但模型选择沉默` / `模型选择沉默` 是正常行为 |
+| 回复失败 | 日志 err_code；`40034100` 主动消息频控、`40034105` 无主动消息权限 |
+| LLM 报错 | `LLM 调用失败`，检查 key 与 base_url 是否还有额度 |
+| 502 | 进程挂了，`systemctl status dsh-bot` |
+
+## 已知问题 / 待办
+
+- 群名片/群名拿不到，只能用 openid 前 8 位做标识。
+- 长期记忆只有 7 天流水，没有摘要；聊久了它会忘掉早期内容。

@@ -1,0 +1,18 @@
+[Unit]
+Description=DSH Bot (botsns QQ webhook bot + DSH/ACP bridge)
+After=network.target
+
+[Service]
+Type=simple
+User=dsfisherman
+Group=dsfisherman
+WorkingDirectory=/opt/dsh-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/dsfisherman
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/home/dsfisherman/.local/bin
+ExecStart=/opt/qqbot/venv/bin/python /opt/dsh-bot/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
