@@ -57,7 +57,7 @@ DSH 每次请求前会重新读工作区的 AGENTS.md，把变更注入会话。
 `persona.md` 只剩兜底作用：DSH 桥挂掉时的本地模型、以及私信回复。它每次调用都查 mtime，改完立即生效。
 两份最好一起改，语气才一致，不然桥上桥下像两个人。
 
-当前人设：**小鲸鱼**（外号大肥鱼，2026-10-27 v0.28，见 `CHANGELOG.md`）。想快速试兜底那份：
+当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.29，见 `CHANGELOG.md`）。想快速试兜底那份：
 
 ```bash
 cd /opt/dsh-bot && /opt/qqbot/venv/bin/python - <<'PY'
@@ -119,3 +119,8 @@ echo "多行也行" | qq-send <group_openid>
 
 - 群名片/群名拿不到，只能用 openid 前 8 位做标识。
 - 长期记忆只有 7 天流水，没有摘要；聊久了它会忘掉早期内容。
+
+## 开发约定
+
+- **每次改动（代码/人设/文档）后必须推 git**：`git add -A && git commit -m "..." && git push`。
+- `config.ini`、`data.db` 等本地文件永不入库（见 `.gitignore`）。

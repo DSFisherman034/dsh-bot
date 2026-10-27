@@ -63,6 +63,7 @@ BRAIN: Brain | None = None
 CLIENT: QQClient | None = None
 BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
+LAST_BUBBLES: dict[str, list[int]] = {}
 
 
 # ---------------- 工具 ----------------
@@ -353,6 +354,10 @@ async def send_group(group, text, msg_id=None) -> bool:
             # 补一句的节奏：短句抢着发，长句稍顿一下
             gap = 0.6 + min(len(part), 40) * 0.03 + random.uniform(0.2, 1.4)
             await asyncio.sleep(min(3.0, gap))
+    if sent:
+        hist = LAST_BUBBLES.setdefault(group, [])
+        hist.append(len(bubbles))
+        del hist[:-6]
     return sent
 
 
@@ -399,6 +404,16 @@ def meme_budget_hint(group: str) -> str:
     return "这一轮如果语境合适，可以自然带一个梗；不合适就别硬塞。"
 
 
+def bubble_hint(group: str) -> str:
+    """防止永远只发一条：最近连续单条就推一把，最近拆太多就收一收。"""
+    hist = LAST_BUBBLES.get(group, [])[-4:]
+    if len(hist) >= 4 and all(n <= 1 for n in hist):
+        return "你最近四条都是一条，这轮如果能自然分成「反应 + 补充」，就用 <🦄发送> 分两条；别硬拆。"
+    if sum(1 for n in hist if n >= 2) >= 3:
+        return "你最近分条有点多，这轮能一条说完就一条。"
+    return "普通闲聊大约一半适合分两条；这轮看情况，别硬拆。"
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -419,7 +434,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
         "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。"
     )
-    return f"{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n{tail}"
+    return f"{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n{bubble_hint(group)}\n\n{tail}"
 
 
 def collect_prompt_images(fresh) -> list[tuple[str, bytes]]:
