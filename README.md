@@ -14,7 +14,7 @@
 | `main.py` | 编排：收消息、判断要不要理、发回复、心跳 | 要 |
 | `brain.py` | 提示词组装 + LLM 调用 + 输出清洗 | 要 |
 | `memory.py` | SQLite 群聊流水（7 天）与每群状态 | 要 |
-| `agent/AGENTS.md` | **主路径人设与输出纪律**（@/插话/心跳都走 DSH，下一轮自动生效） | 不要 |
+| `agent/AGENTS.md` | **主路径人设与输出纪律**（@/插话走 DSH，心跳暂时关闭，下一轮自动生效） | 不要 |
 | `persona.md` | 兜底人设（DSH 桥挂掉时的本地模型、私信；改了立即生效） | 不要 |
 | `config.ini` | 凭据、模型、行为参数 | 要 |
 | `data.db` | 运行时数据库（自动创建，别手动改） | — |
@@ -22,42 +22,42 @@
 ## 行为逻辑
 
 **被 @ / 私信** → 一定回复。
-**没被 @ 的群消息** → 进 `ambient_debounce` 秒合并窗口，窗口结束让模型自己决定说还是 SKIP（`reply_policy` 控制）。
-**群里安静** → 心跳每 `heartbeat_interval` 秒检查；群静了 `heartbeat_idle` 秒、且距上次机器人发言
-`heartbeat_cooldown` 秒以上，才让模型起个话头（同样可以 SKIP）。
+**没被 @ 的群消息** → 进 `ambient_debounce` 秒合并窗口，模型决定说还是 SKIP；
+明显是在接你上一句、或者问你的，必须回。
+**群里安静** → 心跳/暖场暂时关闭（`heartbeat_enabled = false`），等重新设计话题机制；
+打开后按 `heartbeat_interval / idle / cooldown` 跑。
 
 两种平台模式都支持：
 - 「接收全部消息」：事件是 `GROUP_MESSAGE_CREATE`，用 `mentions[].is_you` / 内容含名字判断；
 - 「仅 @ 时说话」：事件全是 `GROUP_AT_MESSAGE_CREATE`，直接当被 @。
 
-其他护栏：静音时段不说话；被 QQ 拒绝（无权限/频控）会给该群关掉主动性；
-等 1–4 秒再发，模拟打字。
+其他护栏：被 QQ 拒绝（无权限/频控）会给该群关掉主动性；等 1–4 秒再发，模拟打字。
 
 ## 调参（config.ini）
 
 ```ini
 [behavior]
-reply_policy = full         ; full：允许插话与心跳；mention_only：只回 @
+reply_policy = full         ; full：允许插话；mention_only：只回 @
 ambient_debounce = 10       ; 非 @ 消息的合并窗口（秒）
-heartbeat_interval = 120    ; 心跳检查间隔
+heartbeat_enabled = false   ; 暖场/心跳总开关（先关，等重新设计话题机制）
+heartbeat_interval = 120    ; 心跳检查间隔（仅 enabled=true）
 heartbeat_idle = 300        ; 群静多久才考虑自己开口
 heartbeat_cooldown = 600    ; 距上次机器人发言多久才允许开口
-quiet_hours = 01:30-08:00   ; 静音时段，留空关闭
 max_reply_chars = 300
 ```
 
-**想让它更活跃**：调小 `ambient_debounce`（5）、`heartbeat_idle`（180）。
-**想让它更安静**：调大这些值，或把 `reply_policy` 改成 `mention_only`（只回 @）。
+**想让它更活跃**：调小 `ambient_debounce`（5）；心跳先关着，等新的话题机制。
+**想让它更安静**：调大 `ambient_debounce`，或把 `reply_policy` 改成 `mention_only`（只回 @）。
 
 ## 调人设
 
-主路径（@、插话、心跳都走 DSH）的人设在 `agent/AGENTS.md`，改完**下一轮自动生效**，不用重启——
+主路径（@、插话都走 DSH；心跳暂时关闭）的人设在 `agent/AGENTS.md`，改完**下一轮自动生效**，不用重启——
 DSH 每次请求前会重新读工作区的 AGENTS.md，把变更注入会话。
 
 `persona.md` 只剩兜底作用：DSH 桥挂掉时的本地模型、以及私信回复。它每次调用都查 mtime，改完立即生效。
 两份最好一起改，语气才一致，不然桥上桥下像两个人。
 
-当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.29，见 `CHANGELOG.md`）。想快速试兜底那份：
+当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.30，见 `CHANGELOG.md`）。想快速试兜底那份：
 
 ```bash
 cd /opt/dsh-bot && /opt/qqbot/venv/bin/python - <<'PY'

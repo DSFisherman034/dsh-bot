@@ -19,7 +19,7 @@ import re
 import sys
 import time
 import traceback
-from datetime import datetime, time as dtime
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import Request
@@ -67,27 +67,6 @@ LAST_BUBBLES: dict[str, list[int]] = {}
 
 
 # ---------------- 工具 ----------------
-
-def parse_quiet(spec: str):
-    """"23:30-08:00" -> (dtime, dtime)；空串表示不静音。"""
-    try:
-        start, end = spec.split("-")
-        h1, m1 = map(int, start.split(":"))
-        h2, m2 = map(int, end.split(":"))
-        return dtime(h1, m1), dtime(h2, m2)
-    except Exception:
-        return None
-
-
-def in_quiet_hours(spec: str) -> bool:
-    window = parse_quiet(spec)
-    if not window:
-        return False
-    now = datetime.now().time()
-    start, end = window
-    if start <= end:
-        return start <= now < end
-    return now >= start or now < end
 
 
 def split_bubbles(text: str, limit: int) -> list[str]:
@@ -253,9 +232,6 @@ async def _ambient_round(group):
     debounce = CONFIG.getint("behavior", "ambient_debounce", fallback=10)
     try:
         await asyncio.sleep(debounce)
-        if in_quiet_hours(CONFIG.get("behavior", "quiet_hours", fallback="")):
-            log.info("插话跳过[静音时段] group=%s", group[:8])
-            return
 
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
@@ -279,9 +255,26 @@ def ambient_instruction(group: str) -> str:
     if last:
         ago = int(time.time() - last[1])
         hint = f"你 {ago} 秒前刚说过：「{last[0][:40]}」。刚说过的话不要重复。\n"
+
+    rows = MEMORY.recent_messages(group, minutes=30, limit=6)
+    last_other = next((r for r in reversed(rows) if not r[3]), None)
+    bot_names = {"Rantindom机器人", "神", "都报"}
+    followup = False
+    if last and last_other and time.time() - last[1] < 180:
+        author, content = last_other[0], (last_other[1] or "")
+        if author not in bot_names:
+            followup = any(k in content for k in (
+                "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
+                "是不是", "能不能", "有没有", "吗",
+            ))
+    if followup:
+        return (
+            "最后一条明显是在接你刚才的话、或者在问你，**必须回**，不要 SKIP。"
+            "顺着对方的问题答，别装死。\n" + hint
+        )
     return (
-        "没人 @ 你。你自己判断要不要接话：话题跟你有关、或者你能接一句有意思的，就说；"
-        "插不上话、或者说了只会显得多余，就输出 SKIP。"
+        "没人 @ 你。能接就接，别太保守：话题跟你有关、你能接一句有意思的、或者对方在等你接，就说；"
+        "只有完全无关、或者说了只会显得多余，才输出 SKIP。"
         + ("\n" + hint if hint else "")
     )
 
@@ -622,6 +615,9 @@ async def heartbeat_loop():
     interval = CONFIG.getint("behavior", "heartbeat_interval", fallback=240)
     idle = CONFIG.getint("behavior", "heartbeat_idle", fallback=900)
     cooldown = CONFIG.getint("behavior", "heartbeat_cooldown", fallback=1500)
+    if not CONFIG.getboolean("behavior", "heartbeat_enabled", fallback=False):
+        log.info("心跳/暖场已关闭（heartbeat_enabled=false），等重新设计话题机制")
+        return
     if CONFIG.get("behavior", "reply_policy", fallback="mention_only") != "full":
         log.info("reply_policy=mention_only，心跳不主动开口")
         return
@@ -629,8 +625,6 @@ async def heartbeat_loop():
     while True:
         await asyncio.sleep(interval)
         try:
-            if in_quiet_hours(CONFIG.get("behavior", "quiet_hours", fallback="")):
-                continue
             for group in MEMORY.known_groups():
                 if time.time() < HEARTBEAT_NEXT.get(group, 0):
                     continue
