@@ -283,7 +283,7 @@ async def _ambient_round(group):
             return
 
         await asyncio.sleep(_typing_delay(text))
-        quote = MEMORY.last_external_msg_id(group, since_id, SELF_NAMES) if _want_quote(-0.1) else None
+        quote = quote_for_ambient(group, since_id)
         await send_group(group, text, msg_id=None, since=since, quote_id=quote)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
@@ -327,7 +327,7 @@ async def reply_group(group, task, who, msg_id=None, message=None):
     # 被 @ 时才把图本身交给 DSH：它真的能看，插话/暖场就够了文字描述
     since = time.time()
     with_images = CONFIG.getboolean("dsh", "attach_images", fallback=True)
-    quote = message.id if (message is not None and _want_quote()) else None
+    quote = quote_for_addressed(group, message)
     text = await ask_dsh(group, f"最后一条是 {who} @ 你，回他一句。", who, message,
                          with_images=with_images)
 
@@ -475,13 +475,57 @@ def _record_own(group, text):
     )
 
 
-def _want_quote(boost: float = 0.0) -> bool:
-    """这一条要不要引用上文。不是每条都引，量在 config [behavior] quote_chance。"""
-    try:
-        base = CONFIG.getfloat("behavior", "quote_chance", fallback=0.3)
-    except Exception:
-        base = 0.3
-    return random.random() < min(0.9, max(0.0, base + boost))
+def _quote_mode() -> str:
+    return (CONFIG.get("behavior", "quote_mode", fallback="auto") or "auto").strip().lower()
+
+
+def _quote_stale() -> float:
+    return CONFIG.getfloat("behavior", "quote_stale_seconds", fallback=120)
+
+
+def quote_for_addressed(group, message) -> str | None:
+    """被 @ 时的引用路由。
+
+    always：每条都引；off：不引；auto（默认）只在有理由时引：
+    - 这条 @ 已经被后面的消息顶上去 → 引它，别人才知道你在回哪句；
+    - 这条 @ 已经隔了 2 分钟以上 → 引它，补上下文；
+    - 它就紧跟在你上一句后面、或者就是最新一条 → 不引，引了是噪音。
+    """
+    mode = _quote_mode()
+    if mode == "off" or message is None or not getattr(message, "id", None):
+        return None
+    if mode == "always":
+        return message.id
+    latest = MEMORY.last_external_msg_id(group, 0, SELF_NAMES)
+    if latest and latest != message.id:
+        log.info("引用：@ 的消息已被顶上去 group=%s", group[:8])
+        return message.id
+    age = time.time() - _ts(message.timestamp)
+    if age >= _quote_stale():
+        log.info("引用：@ 的消息隔了 %d 秒 group=%s", age, group[:8])
+        return message.id
+    return None
+
+
+def quote_for_ambient(group, since_id) -> str | None:
+    """插话时的引用路由：只在"接的不是最新那条、或者群里有好几个人在说"时引。"""
+    mode = _quote_mode()
+    if mode == "off":
+        return None
+    rows = MEMORY.external_messages_after(group, since_id, SELF_NAMES, limit=10)
+    if not rows:
+        return None
+    if mode == "always":
+        return rows[-1][0]
+    # 多人插话：最近两条来自不同的人 → 标明接谁的
+    if len(rows) >= 2 and rows[-1][1] != rows[-2][1]:
+        log.info("引用：多人插话，接 %s group=%s", rows[-1][1], group[:8])
+        return rows[-1][0]
+    # 隔太久：已经脱节了
+    if time.time() - rows[-1][2] >= _quote_stale():
+        log.info("引用：最后一条隔了 %d 秒 group=%s", time.time() - rows[-1][2], group[:8])
+        return rows[-1][0]
+    return None
 
 
 def _typing_delay(text: str) -> float:

@@ -136,6 +136,18 @@ class Memory:
         ).fetchall()
         return list(reversed(rows))
 
+    def external_messages_after(self, group, after_id, self_names, limit=10):
+        """id 之后的外部消息，正序：[(msg_id, author, ts), ...]。"""
+        names = tuple(self_names)
+        marks = ",".join("?" * len(names)) if names else "NULL"
+        rows = self.conn.execute(
+            "SELECT msg_id, author, ts FROM messages WHERE group_openid=? AND id>?"
+            f" AND NOT (is_bot=1 AND author IN ({marks})) AND msg_id IS NOT NULL"
+            " ORDER BY id DESC LIMIT ?",
+            (group, after_id, *names, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
     def last_external_msg_id(self, group, after_id=0, self_names=()):
         """最近一条外部消息的平台 msg_id（引用用）；没有就 None。"""
         names = tuple(self_names)
