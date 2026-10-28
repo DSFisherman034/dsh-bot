@@ -40,6 +40,7 @@ BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
 # [[img:3478444e]] 精确哈希，或 [[img:震惊脸]] 按描述找
 IMG_MARKER = re.compile(r"\[\[img:([^\[\]\n]{1,60})\]\]")
+IMG_SCOPE_RE = re.compile(r"\[\[img-scope:([^\[\]\n|]{1,60})\|([^\[\]\n]{1,120})\]\]")
 IMG_HASH_RE = re.compile(r"h=([0-9a-f]{8})")
 
 # 发送报错里出现这些 = 这个群永远发不进去（群号无效/被踢/无权限），关掉主动发言别再烧 token。
@@ -331,8 +332,26 @@ async def reply_group(group, task, who, msg_id=None, message=None):
 
 # ---------------- 发送 ----------------
 
+async def apply_image_scopes(text: str) -> str:
+    """模型用 [[img-scope:描述|适用范围]] 更新图库；这条不发给群。"""
+    for m in IMG_SCOPE_RE.finditer(text or ""):
+        token, scope = m.group(1).strip(), m.group(2).strip()
+        got = await resolve_image(token)
+        if not got:
+            log.info("改图适用范围失败（图没找到）：%r", token)
+            continue
+        row = MEMORY.image_by_path(got[0])
+        if row:
+            MEMORY.set_image_scope(row[0], scope)
+            log.info("图适用范围更新 %s: %s", row[0][:8], scope[:60])
+    return IMG_SCOPE_RE.sub("", text or "").strip()
+
+
 async def send_group(group, text, msg_id=None) -> bool:
     """返回是否至少发出了一条。"""
+    text = await apply_image_scopes(text)
+    if not text.strip():
+        return False
     limit = CONFIG.getint("behavior", "max_reply_chars", fallback=300)
     bubbles = split_bubbles(text, limit)
     sent = False
@@ -448,10 +467,25 @@ def image_hint(group: str) -> str:
     """把配图比例往 1/3 左右推：太久没配就提醒，太密就压。"""
     hist = LAST_IMAGES.get(group, [])[-4:]
     if len(hist) >= 4 and sum(hist) == 0:
-        return "你最近四条都没配图，这轮如果图能加分，就配一张（[[img:描述]]）；别硬配。"
+        return ("你最近四条都没配图，这轮如果图能加分，就配一张（[[img:描述]]）；别硬配。"
+                "选图前先看适用范围，嘲讽/互损图别用在严肃、安慰或自己被调侃的场合。")
     if sum(hist[-3:]) >= 2:
         return "你最近配图有点多，这轮别配，先说话。"
-    return "大约每 3 条回复可以配一张图；有合适的就配，没有别硬找。"
+    return ("大约每 3 条回复可以配一张图；有合适的就配，没有别硬找。"
+            "选图前先看适用范围，别把嘲讽/互损图用在严肃、安慰或自己被调侃的场合。")
+
+
+def image_library_hint(limit=12) -> str:
+    """把图库描述 + 适用范围给模型，作为选图与改范围的依据。"""
+    rows = MEMORY.image_library(limit)
+    if not rows:
+        return ""
+    lines = [
+        f"- {(desc or '').strip()[:56]}｜{(scope or '通用').strip()[:40]}"
+        for _h, desc, scope in rows
+    ]
+    return ("图库（选图前先看适用范围；嘲讽/互损图只在朋友互损时用，"
+            "不用于自己被调侃、严肃、安慰、陌生人）：\n" + "\n".join(lines))
 
 
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
@@ -483,11 +517,15 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
         "决定不说话就只输出 SKIP。\n"
         "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
-        "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。"
+        "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。\n"
+        "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
+        "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
+    lib = image_library_hint()
+    lib_block = (lib + "\n\n") if lib else ""
     return (
         f"{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
-        f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{tail}"
+        f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
 
@@ -868,6 +906,41 @@ async def main():
             return {"ok": False, "error": str(exc)}
         _record_own("dc:" + openid, text)
         return {"ok": True}
+
+    @CLIENT.app.app.get("/image_scope")
+    async def image_scope_list(request: Request):
+        """看图库描述 + 适用范围；token 保护。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        rows = MEMORY.image_library(50)
+        return {
+            "images": [
+                {"hash": h[:8], "desc": d, "scope": s}
+                for h, d, s in rows
+            ]
+        }
+
+    @CLIENT.app.app.post("/image_scope")
+    async def image_scope_set(request: Request):
+        """改某张图的适用范围：POST {image, scope}；image 可传 8 位哈希或描述。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        body = await request.json()
+        image = (body.get("image") or "").strip()
+        scope = (body.get("scope") or "").strip()
+        if not image:
+            return {"ok": False, "error": "image required"}
+        got = await resolve_image(image)
+        if not got:
+            return {"ok": False, "error": "image not found"}
+        row = MEMORY.image_by_path(got[0])
+        if not row:
+            return {"ok": False, "error": "image record not found"}
+        MEMORY.set_image_scope(row[0], scope)
+        log.info("图适用范围 %s：%s", row[0][:8], scope[:80])
+        return {"ok": True, "hash": row[0][:8], "desc": got[1][:80], "scope": scope}
 
     @CLIENT.app.app.post("/debug_reply")
     async def debug_reply(request: Request):

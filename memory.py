@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS images (
     hash TEXT PRIMARY KEY,
     path TEXT,
     desc TEXT,
+    scope TEXT DEFAULT '',
     ts REAL
 );
 CREATE TABLE IF NOT EXISTS state (
@@ -60,10 +61,12 @@ class Memory:
         self.conn.commit()
 
     def _migrate(self):
-        """老库补列：图片的向量（描述 embedding），存 float32 的 bytes。"""
+        """老库补列：图片向量（描述 embedding）+ 适用范围 scope。"""
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(images)")}
         if "emb" not in cols:
             self.conn.execute("ALTER TABLE images ADD COLUMN emb BLOB")
+        if "scope" not in cols:
+            self.conn.execute("ALTER TABLE images ADD COLUMN scope TEXT DEFAULT ''")
         self.conn.commit()
 
     # ---------- 消息 ----------
@@ -204,6 +207,27 @@ class Memory:
         """[(hash, path, desc, emb_bytes_or_None), ...]，按时间正序。"""
         rows = self.conn.execute(
             "SELECT hash, path, desc, emb FROM images ORDER BY ts"
+        ).fetchall()
+        return rows
+
+    def image_by_path(self, path):
+        row = self.conn.execute(
+            "SELECT hash, scope FROM images WHERE path=? LIMIT 1", (str(path),)
+        ).fetchone()
+        return row
+
+    def set_image_scope(self, h, scope):
+        self.conn.execute(
+            "UPDATE images SET scope=? WHERE hash=?", ((scope or "")[:500], h)
+        )
+        self.conn.commit()
+
+    def image_library(self, limit=20):
+        """[(hash, desc, scope), ...]，有适用范围的排前面，方便模型参考。"""
+        rows = self.conn.execute(
+            "SELECT hash, desc, scope FROM images"
+            " ORDER BY CASE WHEN scope IS NULL OR scope='' THEN 1 ELSE 0 END, ts DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return rows
 
