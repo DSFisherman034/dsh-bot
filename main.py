@@ -926,13 +926,12 @@ async def housekeeping_loop():
             log.exception("清理出错")
 
 
-HEARTBEAT_NEXT: dict[str, float] = {}
-
 HEARTBEAT_INSTRUCTION = (
     "群里冷场了，没人说话。你是负责暖场的那个。"
-    "**不要接着上面聊过的旧话题**，直接起一个新的：一句具体的观点、一个小发现，或者一个能接的问题。"
+    "用下面这条由头起一个话头：一句具体的、能接的话——问一句后续、吐槽一句、说个小发现。"
+    "不要播报新闻，不要解释材料从哪来。"
     "只发一句，不要自问自答，不要一次发好几条，不要问「在吗」「有人吗」。"
-    "语气像随口一句，不要像开场白。不想说就输出 SKIP。"
+    "由头跟群里最近聊的对不上，宁可输出 SKIP。"
 )
 
 
@@ -994,48 +993,127 @@ async def memory_loop():
         await asyncio.sleep(SUMMARY_INTERVAL)
 
 
-async def heartbeat_loop():
-    interval = CONFIG.getint("behavior", "heartbeat_interval", fallback=240)
-    idle = CONFIG.getint("behavior", "heartbeat_idle", fallback=900)
-    cooldown = CONFIG.getint("behavior", "heartbeat_cooldown", fallback=1500)
-    if not CONFIG.getboolean("behavior", "heartbeat_enabled", fallback=False):
-        log.info("心跳/暖场已关闭（heartbeat_enabled=false），等重新设计话题机制")
+def _warm_state(group: str) -> dict:
+    raw = MEMORY.get_state(f"warm:{group}")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_warm_state(group: str, st: dict):
+    try:
+        MEMORY.set_state(f"warm:{group}", json.dumps(st, ensure_ascii=False))
+    except Exception:
+        log.exception("保存暖场状态失败 group=%s", group[:8])
+
+
+async def _maybe_warmup(group: str):
+    """够条件才暖场：有人在、冷场够久、不烦人、有由头。"""
+    if group.startswith("dc:"):
+        return  # 私聊不暖场
+    now = time.time()
+    st = _warm_state(group)
+    if now < float(st.get("silent_until", 0) or 0):
         return
-    if CONFIG.get("behavior", "reply_policy", fallback="mention_only") != "full":
-        log.info("reply_policy=mention_only，心跳不主动开口")
+    if not MEMORY.group_flag(group, "proactive_ok"):
+        return
+    if 1 <= datetime.now().hour < 7:
         return
 
+    idle = CONFIG.getint("behavior", "warmup_idle", fallback=1800)
+    alive = CONFIG.getint("behavior", "warmup_alive", fallback=21600)
+    cooldown = CONFIG.getint("behavior", "warmup_cooldown", fallback=10800)
+    daily_max = CONFIG.getint("behavior", "warmup_daily_max", fallback=3)
+    miss_stop = CONFIG.getint("behavior", "warmup_miss_stop", fallback=2)
+    silent = CONFIG.getint("behavior", "warmup_silent", fallback=86400)
+
+    last_act = MEMORY.last_activity(group)
+    if now - last_act < idle:
+        return                       # 还有人在说话，不用暖
+    if now - last_act > alive:
+        return                       # 太久没人，说了也没人看
+
+    # 上一次暖场有没有人接：没人接记一笔，连着两次就歇一天
+    pending = st.pop("pending_id", None)
+    if pending is not None:
+        if MEMORY.has_external_since(group, int(pending), SELF_NAMES):
+            st["miss"] = 0
+        else:
+            st["miss"] = int(st.get("miss", 0) or 0) + 1
+            if st["miss"] >= miss_stop:
+                st["silent_until"] = now + silent
+                st["miss"] = 0
+                log.info("暖场连着没人接，静默 %d 小时 group=%s",
+                         silent // 3600, group[:8])
+
+    if now < float(st.get("silent_until", 0) or 0):
+        _save_warm_state(group, st)
+        return
+    if now - float(st.get("last_ts", 0) or 0) < cooldown:
+        _save_warm_state(group, st)
+        return
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    if st.get("day") != today:
+        st["day"] = today
+        st["count"] = 0
+    if int(st.get("count", 0) or 0) >= daily_max:
+        _save_warm_state(group, st)
+        return
+
+    last_bot = MEMORY.last_bot_message(group)
+    if last_bot and now - last_bot[1] < 600:
+        _save_warm_state(group, st)
+        return
+
+    stuff = await material.collect(group, MEMORY)
+    if not stuff:
+        log.info("暖场：没有合格由头，跳过 group=%s", group[:8])
+        st["last_ts"] = now - cooldown + 1800
+        _save_warm_state(group, st)
+        return
+
+    instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
+                   + f"\n\n手上的由头：\n{stuff}")
+    text = await ask_dsh(group, instruction)
+    if not text:
+        st["last_ts"] = now - cooldown + 1800
+        _save_warm_state(group, st)
+        log.info("暖场：模型选择不说，半小时后再看 group=%s", group[:8])
+        return
+
+    await asyncio.sleep(_typing_delay(text))
+    ok = await send_group(group, text, msg_id=None)
+    if ok:
+        st["last_ts"] = now
+        st["count"] = int(st.get("count", 0) or 0) + 1
+        st["pending_id"] = MEMORY.max_id(group)
+        log.info("暖场发出（今天第 %d 次）group=%s", st["count"], group[:8])
+    else:
+        st["last_ts"] = now - cooldown + 1800
+        log.info("暖场发送失败 group=%s", group[:8])
+    _save_warm_state(group, st)
+
+
+async def heartbeat_loop():
+    if not CONFIG.getboolean("behavior", "heartbeat_enabled", fallback=False):
+        log.info("暖场已关闭（heartbeat_enabled=false）")
+        return
+    if CONFIG.get("behavior", "reply_policy", fallback="mention_only") != "full":
+        log.info("reply_policy=mention_only，暖场不开口")
+        return
+    interval = CONFIG.getint("behavior", "heartbeat_interval", fallback=300)
     while True:
         await asyncio.sleep(interval)
-        try:
-            for group in MEMORY.known_groups():
-                if time.time() < HEARTBEAT_NEXT.get(group, 0):
-                    continue
-                if not MEMORY.group_flag(group, "proactive_ok"):
-                    continue
-                last_bot = MEMORY.last_bot_message(group)
-                if last_bot and time.time() - last_bot[1] < cooldown:
-                    continue
-                if time.time() - MEMORY.last_activity(group) < idle:
-                    continue
-                stuff = await material.collect(group, MEMORY)
-                instruction = HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
-                if stuff:
-                    instruction += f"\n\n手上有个现成的材料，你可以用它起话头，也可以不聊它：\n{stuff}"
-                    log.info("暖场材料 group=%s: %s", group[:8], stuff[:60])
-                text = await ask_dsh(group, instruction)
-                if not text:
-                    # 冷场但模型不想说：半小时后再问，别每 2 分钟烧一次
-                    HEARTBEAT_NEXT[group] = time.time() + 1800
-                    log.info("心跳：模型选择不说，30 分钟后再试 group=%s", group[:8])
-                    continue
-                await asyncio.sleep(_typing_delay(text))
-                if not await send_group(group, text, msg_id=None):  # 主动消息
-                    # 发不进去就别每 2 分钟白烧一轮 agent
-                    HEARTBEAT_NEXT[group] = time.time() + 1800
-                    log.info("心跳发送失败，30 分钟后再试 group=%s", group[:8])
-        except Exception:
-            log.exception("心跳循环出错")
+        for group in MEMORY.known_groups():
+            try:
+                await _maybe_warmup(group)
+            except Exception:
+                log.exception("暖场出错 group=%s", group[:8])
 
 
 

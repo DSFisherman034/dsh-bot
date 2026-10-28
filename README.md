@@ -24,8 +24,9 @@
 **被 @ / 私信** → 一定回复。
 **没被 @ 的群消息（包括其他 bot）** → 进 `ambient_debounce` 秒合并窗口，模型决定说还是 SKIP；
 明显是在接你上一句、或者问你的，必须回。
-**群里安静** → 心跳/暖场暂时关闭（`heartbeat_enabled = false`），等重新设计话题机制；
-打开后按 `heartbeat_interval / idle / cooldown` 跑。
+**群里安静** → 暖场（`heartbeat_enabled = true`）：群静 30 分钟、最近 6 小时有人说过话、
+两次暖场至少隔 3 小时、每群每天最多 3 次；由头只从群史回访 / 图库 / 本机状态里取，
+不播报新闻。连着两次没人接就静默 24 小时。
 **群事件记忆** → 每 30 分钟把 ≥12 条新消息压成 1–3 条事件，存 `memories` 表，
 注入后续 prompt（最近 8 条，保留 60 天）；启动 5 秒后先补一次。
 **同群发送** → 串行；发送中途来了新消息的追问/纠错（人类或其他 bot），会停掉剩余气泡，交给新消息处理。
@@ -42,10 +43,14 @@
 [behavior]
 reply_policy = full         ; full：允许插话；mention_only：只回 @
 ambient_debounce = 10       ; 非 @ 消息的合并窗口（秒）
-heartbeat_enabled = false   ; 暖场/心跳总开关（先关，等重新设计话题机制）
-heartbeat_interval = 120    ; 心跳检查间隔（仅 enabled=true）
-heartbeat_idle = 300        ; 群静多久才考虑自己开口
-heartbeat_cooldown = 600    ; 距上次机器人发言多久才允许开口
+heartbeat_enabled = true    ; 暖场总开关
+heartbeat_interval = 300    ; 检查间隔（秒）
+warmup_idle = 1800          ; 群静多久算冷场
+warmup_alive = 21600        ; 多久内有人说话才算"群里还有人"
+warmup_cooldown = 10800     ; 两次暖场最小间隔
+warmup_daily_max = 3        ; 每群每天最多几次
+warmup_miss_stop = 2        ; 连着几次没人接就静默
+warmup_silent = 86400       ; 静默多久
 max_reply_chars = 300
 ```
 
