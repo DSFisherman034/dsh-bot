@@ -123,6 +123,19 @@ class Memory:
         ).fetchone()
         return row[0] or 0
 
+    def window_base(self, group, keep=20):
+        """最近 keep 条消息窗口的起点（id 游标）；给上下文压缩用。
+
+        id 可能因清理有空洞，减 1 后多带上几条也无妨，只用于确定窗口边界。
+        """
+        rows = self.conn.execute(
+            "SELECT id FROM messages WHERE group_openid=? ORDER BY id DESC LIMIT ?",
+            (group, keep),
+        ).fetchall()
+        if not rows:
+            return 0
+        return max(0, rows[-1][0] - 1)
+
     def messages_after_id(self, group, after_id, limit=20):
         """id 游标之后的增量，按 id 正序：[(id, author, content, ts, is_bot), ...]。
 

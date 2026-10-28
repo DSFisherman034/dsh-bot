@@ -73,6 +73,13 @@ LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
 GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
 
+# 上下文滚动压缩：本群会话窗口攒到 50 条（含机器人自己的发言）就把最早 30 条
+# 压成摘要，只留最近 20 条原文；压缩后清掉 DSH 会话，下一轮用「摘要 + 20 条」重开。
+CTX_COMPACT_AT = 50
+CTX_COMPACT_HEAD = 30
+CTX_KEEP = 20
+REPLAY: dict[str, int] = {}   # group -> 压缩后窗口起点 id，下一轮重放这段原文
+
 
 # ---------------- 工具 ----------------
 
@@ -604,12 +611,88 @@ def _ts(iso: str) -> float:
 
 
 
+def _ctx_state(group: str, name: str) -> str:
+    return MEMORY.get_state(f"{name}:{group}", "") or ""
+
+
+async def summarize_context(group: str, rows: list) -> str:
+    """把窗口里最早的几十条压成一段摘要；失败就用截断兜底，不卡消息。"""
+    lines = []
+    for _id, author, content, ts, is_bot in rows:
+        clock = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+        name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else (author or "某人")
+        lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
+    try:
+        out = await BRAIN.complete(
+            "你是群聊摘要器。只输出摘要正文，不要解释、不要评价。",
+            "把下面这段群聊压成 1 段不超过 200 字的事实摘要："
+            "谁说了什么、结论是什么、还有什么事没下文。不要复述原话。\n\n"
+            + "\n".join(lines),
+            temperature=0.2, max_tokens=320, enable_thinking=False,
+        )
+        return (out or "").strip()[:400]
+    except Exception:
+        log.warning("上下文摘要生成失败，用截断兜底 group=%s", group[:8], exc_info=True)
+        return "；".join((c or "").strip()[:40] for _i, _a, c, _t, _b in rows)[:200]
+
+
+async def maybe_compact(group: str):
+    """滑动窗口：本群会话攒到 50 条（含自己的发言）就压最早 30 条，留最近 20 条原文。
+
+    压缩后清掉 DSH session，下一轮用「累积摘要 + 20 条原文」新建会话，
+    这样 DSH 侧历史不会从一次对话滚成一整天的流水。
+    """
+    key_base = f"ctxbase:{group}"
+    base_raw = MEMORY.get_state(key_base)
+    if base_raw is None:
+        # 首次（含重启后旧会话已清）：窗口从最近 20 条开始，别把陈年流水压进来
+        MEMORY.set_state(key_base, MEMORY.window_base(group, keep=CTX_KEEP))
+        return
+    base = int(base_raw or 0)
+    rows = MEMORY.messages_after_id(group, base, limit=CTX_COMPACT_AT + 50)
+    if len(rows) < CTX_COMPACT_AT:
+        return
+    # 正常是 50 条：压最早 30、留最近 20；异常积压时一次压到只剩最近 20
+    head = rows[:-CTX_KEEP]
+    if len(head) > 60:                 # 摘要输入封顶，别一次塞几百条
+        head = head[-60:]
+    keep = rows[-CTX_KEEP:]
+    new_base = rows[-CTX_KEEP - 1][0]
+    try:
+        summary = await asyncio.wait_for(summarize_context(group, head), timeout=10)
+    except asyncio.TimeoutError:
+        log.warning("上下文摘要超时，用截断兜底 group=%s", group[:8])
+        summary = "；".join((c or "").strip()[:40] for _i, _a, c, _t, _b in head)[:200]
+    if summary:
+        prev = _ctx_state(group, "ctxsum")
+        merged = (prev + "\n" + summary).strip() if prev else summary
+        MEMORY.set_state(f"ctxsum:{group}", "\n".join(merged.splitlines()[-3:]))
+    new_base = head[-1][0]
+    MEMORY.set_state(key_base, new_base)
+    MEMORY.set_state(f"sid:{group}", "")       # 下一轮新建会话
+    if BRIDGE is not None:
+        BRIDGE.sessions.pop(group, None)       # 内存里的旧 session 也要丢掉
+    REPLAY[group] = new_base
+    LAST_SEEN_ID[group] = new_base
+    PENDING_SEEN.pop(group, None)
+    log.info("上下文压缩 group=%s：压 %d 条，留 %d 条原文",
+             group[:8], len(head), len(keep))
+
+
 def _fresh_rows(group: str) -> list:
     """这一轮要喂给 DSH 的增量转录。
 
     游标是消息自增 id，不是时间：平台 ts 精度到秒且比本机慢 1-2 秒，
     用本机 time.time() 当 since 会把刚到的消息当成"旧的"丢掉。
     """
+    if group in REPLAY:
+        # 刚压缩完：新会话第一轮重放保留的 20 条原文（可能夹着压缩后新到的消息）
+        base = REPLAY.pop(group)
+        rows = MEMORY.messages_after_id(group, base, limit=100)
+        if rows:
+            PENDING_SEEN[group] = rows[-1][0]
+            return [(author, content, ts, is_bot) for _id, author, content, ts, is_bot in rows]
+        return []
     last = PENDING_SEEN.get(group) or LAST_SEEN_ID.get(group)
     if last is None:
         rows = MEMORY.recent_messages(group, minutes=180, limit=20)
@@ -690,6 +773,10 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
     head = "以下是群里刚才的消息（时间 24 小时制）：\n" + "\n".join(lines) if lines else "群里还没有聊天记录。"
+    summ = _ctx_state(group, "ctxsum").strip()
+    sum_block = (
+        "更早的对话摘要（已压缩，参考就好，不要主动复述）：\n" + summ + "\n\n"
+    ) if summ else ""
     mem = MEMORY.recent_memories(group, limit=8)
     mem_block = ""
     if mem:
@@ -714,7 +801,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{sum_block}{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
@@ -885,6 +972,7 @@ async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
     if BRIDGE is None:
         return None
     key = f"sid:{group}"
+    await maybe_compact(group)   # 窗口到 50 条先压成摘要，再取本轮增量
     fresh = _fresh_rows(group)
     prompt = build_dsh_prompt(group, instruction, who, message, fresh=fresh)
     images = collect_prompt_images(fresh) if with_images else []
@@ -1151,6 +1239,10 @@ async def main():
 
     MEMORY = Memory(db_path)
     MEMORY.prune(days=7)
+    # 首次启用压缩机制时，窗口从最近 20 条开始，别把几天的旧流水压进摘要
+    for _g in MEMORY.known_groups():
+        if MEMORY.get_state(f"ctxbase:{_g}") is None:
+            MEMORY.set_state(f"ctxbase:{_g}", MEMORY.window_base(_g, keep=CTX_KEEP))
     BRAIN = Brain(
         {
             "base_url": CONFIG.get("ai", "base_url").strip(),
