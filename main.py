@@ -207,13 +207,46 @@ async def handle_dc(message):
             is_bot=False, ts=_ts(message.timestamp),
         )
         rows = MEMORY.recent_messages(group)
-        text = await BRAIN.respond(rows, "addressed", message.author.username)
+        who = message.author.username or "对方"
+
+        # 弱隔离：私聊能看到群里公开的上下文，但群聊永远看不到私聊。
+        extra = ""
+        try:
+            groups = [g for g in MEMORY.known_groups() if not g.startswith("dc:")]
+            if groups:
+                main_group = max(groups, key=MEMORY.last_activity)
+                parts = []
+                mems = MEMORY.recent_memories(main_group, limit=6)
+                if mems:
+                    mem_lines = [
+                        f"[{datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')}] {text}"
+                        for ts, _kind, text in mems
+                    ]
+                    parts.append("群内记忆（群里公开发生的事）：\n" + "\n".join(mem_lines))
+                gr = MEMORY.recent_messages(main_group, minutes=180, limit=12)
+                if gr:
+                    gr_lines = []
+                    for author, content, ts, is_bot in gr:
+                        clock = datetime.fromtimestamp(ts).strftime("%H:%M")
+                        name = "你" if is_bot else (author or "某人")
+                        gr_lines.append(f"[{clock}] {name}: {(content or '').strip()[:160]}")
+                    parts.append("群里最近的消息（群里的人都知道）：\n" + "\n".join(gr_lines))
+                if parts:
+                    extra = (
+                        "这是私聊，只有你和对方知道。下面是群里公开的上下文，可以拿来接话，"
+                        "但不要把私聊内容当成群里已知，也不要在群里提私聊。\n\n"
+                        + "\n\n".join(parts)
+                    )
+        except Exception:
+            log.exception("读取群上下文失败（私信继续）")
+
+        text = await BRAIN.respond(rows, "dc", who, extra=extra, title="你们的私聊记录")
         if not text:
             return
         await asyncio.sleep(_typing_delay(text))
         await CLIENT.dc.send_message(message.author.openid, text)
         _record_own(group, text)
-        log.info("私信回复 %s: %s", message.author.username, text[:60])
+        log.info("私信回复 %s: %s", who, text[:60])
     except Exception:
         log.exception("处理私信出错")
 
@@ -816,6 +849,25 @@ async def main():
             return {"ok": False, "error": "group and text required"}
         ok = await send_group(group, text, msg_id=None)
         return {"ok": ok, **({} if ok else {"error": "send failed"})}
+
+    @CLIENT.app.app.post("/send_dc")
+    async def send_dc_api(request: Request):
+        """出站私信：POST {openid, text}，需要 token。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        body = await request.json()
+        openid = (body.get("openid") or "").strip()
+        text = (body.get("text") or "").strip()
+        if not openid or not text:
+            return {"ok": False, "error": "openid and text required"}
+        try:
+            await CLIENT.dc.send_message(openid, text)
+        except Exception as exc:
+            log.exception("私信发送失败")
+            return {"ok": False, "error": str(exc)}
+        _record_own("dc:" + openid, text)
+        return {"ok": True}
 
     @CLIENT.app.app.post("/debug_reply")
     async def debug_reply(request: Request):

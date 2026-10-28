@@ -4,6 +4,7 @@
 用法：
     qq-send <group_openid> "要发的内容"
     echo "要发的内容" | qq-send <group_openid>
+    qq-send --dc <openid> "要发的内容"
     qq-send --groups                 列出最近有消息的群
 
 配置从 /opt/dsh-bot/config.ini 读 [send] token 与 [bot] port，只连 127.0.0.1。
@@ -49,6 +50,17 @@ def main():
         return
     if args[0] in ("--groups", "-g"):
         print(json.dumps(call("/groups"), ensure_ascii=False, indent=2))
+        return
+    if args[0] in ("--dc", "-d"):
+        if len(args) < 3:
+            sys.exit('用法：qq-send --dc <openid> "内容"')
+        openid = args[1]
+        text = " ".join(args[2:]).strip()
+        if not text and not sys.stdin.isatty():
+            text = sys.stdin.read().strip()
+        if not text:
+            sys.exit("没有内容可发")
+        print(json.dumps(call("/send_dc", {"openid": openid, "text": text}), ensure_ascii=False))
         return
 
     group = args[0]

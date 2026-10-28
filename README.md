@@ -59,7 +59,7 @@ DSH 每次请求前会重新读工作区的 AGENTS.md，把变更注入会话。
 `persona.md` 只剩兜底作用：DSH 桥挂掉时的本地模型、以及私信回复。它每次调用都查 mtime，改完立即生效。
 两份最好一起改，语气才一致，不然桥上桥下像两个人。
 
-当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.32，见 `CHANGELOG.md`）。想快速试兜底那份：
+当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.33，见 `CHANGELOG.md`）。想快速试兜底那份：
 
 ```bash
 cd /opt/dsh-bot && /opt/qqbot/venv/bin/python - <<'PY'
@@ -100,12 +100,20 @@ sudo systemctl restart dsh-bot
 ```bash
 qq-send --groups                       # 看有哪些群
 qq-send <group_openid> "在吗"           # 发一句话
+qq-send --dc <openid> "在吗"            # 发私信
 echo "多行也行" | qq-send <group_openid>
 ```
 
-底层是 `POST http://127.0.0.1:3704/send`，body `{"group": "...", "text": "..."}`，
-必须带 `x-token`（值在 `config.ini [send] token`）。token 是防止公网乱发的唯一屏障——
-这台机器的 nginx 把整个域名反代到 3704，`/send` 公网可达，所以**别把 token 贴到聊天记录里**。
+底层是 `POST http://127.0.0.1:3704/send`（群）和 `/send_dc`（私信），body 分别是
+`{"group": "...", "text": "..."}` / `{"openid": "...", "text": "..."}`，必须带 `x-token`
+（值在 `config.ini [send] token`）。token 是防止公网乱发的唯一屏障——
+这台机器的 nginx 把整个域名反代到 3704，`/send`、`/send_dc` 公网可达，所以**别把 token 贴到聊天记录里**。
+
+## 私聊与群上下文（弱隔离）
+
+- 私聊 prompt 会带**群里最近 12 条 + 群记忆 6 条**，标注为「群里公开」；
+- 群聊 prompt 不读 `dc:`，私聊内容不会回流群聊；
+- 私聊里可以评论群里发生的事，但不会把私聊内容当成群里已知。
 
 ## 本地测试（不往群里发）
 

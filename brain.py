@@ -14,6 +14,7 @@ TASKS = {
     "addressed": "{who} 刚 @ 了你，最后一条就是。回他，别装死。",
     "ambient": "没人叫你。你可以顺着话题插一句，也可以不说话。",
     "heartbeat": "群里安静了一会儿。你可以自己起个话头、吐槽一句，也可以什么都不说。",
+    "dc": "对方在私聊里给你发了一条消息，回他一句。",
 }
 
 
@@ -85,7 +86,8 @@ class Brain:
 
     # ---------- 生成一句话 ----------
 
-    async def respond(self, rows, task: str = "ambient", who: str = "") -> str | None:
+    async def respond(self, rows, task: str = "ambient", who: str = "",
+                      extra: str = "", title: str = "群里的最近聊天") -> str | None:
         system = self.persona()
         rule = TASKS.get(task, TASKS["ambient"]).format(who=who)
         now = datetime.now().strftime("%H:%M")
@@ -96,9 +98,10 @@ class Brain:
             mine_hint = f"\n你最近已经说过：{said}\n别重复自己说过的话，也别换个说法再说一遍。\n"
         user = (
             f"现在是 {now}。\n\n"
-            f"群里的最近聊天：\n{self.transcript(rows)}\n{mine_hint}\n"
+            + (extra + "\n\n" if extra else "")
+            + f"{title}：\n{self.transcript(rows)}\n{mine_hint}\n"
             f"{rule}\n\n"
-            "只输出要发到群里的那一句话本身：不要加引号、不要加名字前缀、不要 Markdown、"
+            "只输出要发到聊天里的那一句话本身：不要加引号、不要加名字前缀、不要 Markdown、"
             "不要解释你在做什么。决定不说话，就只输出 SKIP。"
         )
         raw = await self.complete(system, user)
