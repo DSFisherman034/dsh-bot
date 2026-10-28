@@ -131,6 +131,7 @@ echo "多行也行" | qq-send <group_openid>
 - 模型没有工具调用；要搜图就输出 `[[img-search:描述或情绪]]`，`send_group` 会搜索图库并发最像的一张，不需要审批。
 - 手动搜索：`GET /image_search?q=摸鱼&limit=5`（token），返回 hash/描述/scope/score。
 - 后续图源登记在 `image_sources.json`；`GET /image_sources` 查看，先存入口不急着接。
+- 图片文件统一 `644`：`/opt/dsh-bot/images` 是 nginx root，权限 600 会 403，QQ 就报 `40093007 富媒体文件下载失败`。
 
 ## 本地测试（不往群里发）
 

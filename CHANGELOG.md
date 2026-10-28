@@ -399,3 +399,14 @@
 - 新增 `GET /image_search?q=...&limit=5`（token）和 `image_sources.json` 图源登记。
 - 模型提示词明确“没有外部工具，但可以用 img-search”，不再说“不能搜图”。
 - 需要重启。
+
+## 2026-10-28 · v0.36.1 修复图片 403 / 发图日志
+
+- 现象：16:10 搜索到「摸鱼」图（0.75），但群里没看到；QQ `/files` 返回
+  `400 40093007 富媒体文件下载失败`，`img.rantindom.com` 对这张图 403。
+- 原因：导入脚本 `write_bytes` 后权限是 600，nginx 的 `nobody` 读不了；
+  `publish` 对同路径直接返回，没有 chmod；`send_group` 在发图成功前就打了「群发图」。
+- 修：导入和 `publish` 统一 chmod 644；`publish` 失败就中止上传；
+  `send_group` 只有 `ok_img` 才记发送/打「群发图」，失败打 warning。
+- 验证：`/send` image `2309d05d` → `/files` 200、`/messages` 200；364 张图已 chmod 644。
+- 需要重启。

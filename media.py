@@ -247,14 +247,16 @@ async def embed_texts(texts: list[str], base_url: str, api_key: str, model: str,
 
 
 def publish(path: Path, public_dir: Path) -> bool:
-    """把图复制到 nginx 的静态目录，让它有个公网 URL。"""
+    """把图复制到 nginx 的静态目录，并保证 nginx 能读（644）。"""
     try:
         public_dir.mkdir(parents=True, exist_ok=True)
         dst = public_dir / path.name
         if dst.resolve() == path.resolve():
+            path.chmod(0o644)
             return True  # 已经在静态目录里（正常情况：图片就落在 nginx root 下）
         if not dst.exists():
             shutil.copy2(path, dst)
+        dst.chmod(0o644)
         return True
     except Exception:
         log.exception("复制到静态目录失败")
@@ -269,7 +271,9 @@ async def upload_and_send(client, group: str, path: Path, msg_id: str | None = N
     try:
         if True:
             if public_dir is not None:
-                publish(path, public_dir)
+                if not publish(path, public_dir):
+                    log.warning("图片发布失败，发图中止：%s", path)
+                    return False
             image_url = f"{base_url.rstrip('/')}/{path.name}"
             log.info("发图 URL: %r (base=%r)", image_url, base_url)
             async with httpx.AsyncClient(timeout=60.0) as http:

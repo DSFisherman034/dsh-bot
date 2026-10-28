@@ -79,6 +79,7 @@ async def import_nekowhale(client, mem, embeds):
             ext = Path(filename).suffix.lower() or ".gif"
             path = DEST / f"{sha[:16]}{ext}"
             path.write_bytes(data)
+            path.chmod(0o644)
             desc = (m.get("desc") or m.get("en") or m.get("text") or item["id"]).strip()
             scope = (
                 f"大肥鱼表情包｜情绪={m.get('emotion','')}｜"
@@ -127,6 +128,7 @@ def import_dsh_meme(mem, embeds):
         ext = src.suffix.lower() or ".jpg"
         dest = DEST / f"{sha[:16]}{ext}"
         dest.write_bytes(data)
+        dest.chmod(0o644)
         desc = (caption or file_name).strip()
         scope = (
             f"大肥鱼表情包｜分类={tag}｜关键词={keywords}｜"

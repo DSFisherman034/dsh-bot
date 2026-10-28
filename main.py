@@ -401,8 +401,10 @@ async def send_group(group, text, msg_id=None, since=None) -> bool:
                         if ok_img:
                             sent_count += 1
                             sent_image = True
-                        MEMORY.mark_bot_spoke(group)
-                        log.info("群发图 %s: %s", group[:8], row[1][:30])
+                            MEMORY.mark_bot_spoke(group)
+                            log.info("群发图 %s: %s", group[:8], row[1][:30])
+                        else:
+                            log.warning("群发图失败 %s: %s", group[:8], row[1][:30])
                     else:
                         log.info("想发的图没找到：%r", m.group(1))
                     part = IMG_MARKER.sub("", part).strip()
