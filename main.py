@@ -662,7 +662,8 @@ async def summarize_group(group: str) -> int:
     )
     try:
         text = await BRAIN.complete(
-            system, "群聊：\n" + "\n".join(lines), temperature=0.2, max_tokens=240
+            system, "群聊：\n" + "\n".join(lines),
+            temperature=0.2, max_tokens=240, enable_thinking=False,
         )
     except Exception:
         log.exception("群记忆总结调用失败 group=%s", group[:8])
@@ -673,6 +674,10 @@ async def summarize_group(group: str) -> int:
         if not line or line.upper() == "NONE":
             continue
         events.append(line)
+    if len(events) == 1:
+        parts = [p.strip() for p in events[0].split("。") if p.strip()]
+        if len(parts) > 1:
+            events = parts
     for e in events[:3]:
         MEMORY.add_memory(group, e)
     MEMORY.set_state(f"mem:{group}", str(rows[-1][2]))

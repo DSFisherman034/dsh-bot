@@ -56,7 +56,8 @@ class Brain:
 
     # ---------- 调用 ----------
 
-    async def complete(self, system: str, user: str, temperature=None, max_tokens=None) -> str:
+    async def complete(self, system: str, user: str, temperature=None, max_tokens=None,
+                       enable_thinking=None) -> str:
         payload = {
             "model": self.model,
             "messages": [
@@ -66,6 +67,8 @@ class Brain:
             "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": self.max_tokens if max_tokens is None else max_tokens,
         }
+        if enable_thinking is not None:
+            payload["enable_thinking"] = enable_thinking
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         last = None
         for _ in range(2):
