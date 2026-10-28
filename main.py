@@ -66,6 +66,7 @@ BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
+GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 # ---------------- 工具 ----------------
@@ -267,6 +268,7 @@ async def _ambient_round(group):
     debounce = CONFIG.getint("behavior", "ambient_debounce", fallback=10)
     try:
         await asyncio.sleep(debounce)
+        since = time.time()
 
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
@@ -274,7 +276,7 @@ async def _ambient_round(group):
             return
 
         await asyncio.sleep(_typing_delay(text))
-        await send_group(group, text, msg_id=None)
+        await send_group(group, text, msg_id=None, since=since)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
     finally:
@@ -293,11 +295,10 @@ def ambient_instruction(group: str) -> str:
 
     rows = MEMORY.recent_messages(group, minutes=30, limit=6)
     last_other = next((r for r in reversed(rows) if not r[3]), None)
-    bot_names = {"Rantindom机器人", "神", "都报"}
     followup = False
     if last and last_other and time.time() - last[1] < 180:
         author, content = last_other[0], (last_other[1] or "")
-        if author not in bot_names:
+        if author not in OTHER_BOT_NAMES:
             followup = any(k in content for k in (
                 "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
                 "是不是", "能不能", "有没有", "吗",
@@ -316,6 +317,7 @@ def ambient_instruction(group: str) -> str:
 
 async def reply_group(group, task, who, msg_id=None, message=None):
     # 被 @ 时才把图本身交给 DSH：它真的能看，插话/暖场就够了文字描述
+    since = time.time()
     with_images = CONFIG.getboolean("dsh", "attach_images", fallback=True)
     text = await ask_dsh(group, f"最后一条是 {who} @ 你，回他一句。", who, message,
                          with_images=with_images)
@@ -327,7 +329,7 @@ async def reply_group(group, task, who, msg_id=None, message=None):
         log.info("模型选择沉默 task=%s", task)
         return
     await asyncio.sleep(_typing_delay(text))
-    await send_group(group, text, msg_id=msg_id)
+    await send_group(group, text, msg_id=msg_id, since=since)
 
 
 # ---------------- 发送 ----------------
@@ -347,67 +349,97 @@ async def apply_image_scopes(text: str) -> str:
     return IMG_SCOPE_RE.sub("", text or "").strip()
 
 
-async def send_group(group, text, msg_id=None) -> bool:
-    """返回是否至少发出了一条。"""
+def _should_interrupt(group, since):
+    """发送中途来了新的真人追问/纠错，就停掉剩余气泡。"""
+    try:
+        rows = MEMORY.recent_messages(group, minutes=2, limit=20)
+    except Exception:
+        return False
+    new = [
+        (a, c or "", ts)
+        for a, c, ts, is_bot in rows
+        if ts > since and not is_bot and a not in OTHER_BOT_NAMES
+    ]
+    if not new:
+        return False
+    text = " ".join(c for _a, c, _ts in new[-3:])
+    keys = ("?", "？", "什么", "怎么", "为什么", "哪", "谁", "吗",
+            "不是", "错误", "不对", "别发", "停", "等等", "等下", "@")
+    return any(k in text for k in keys)
+
+
+async def send_group(group, text, msg_id=None, since=None) -> bool:
+    """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = await apply_image_scopes(text)
     if not text.strip():
         return False
+    if since is None:
+        since = time.time()
     limit = CONFIG.getint("behavior", "max_reply_chars", fallback=300)
     bubbles = split_bubbles(text, limit)
-    sent = False
-    for i, part in enumerate(bubbles):
-        try:
-            m = IMG_MARKER.search(part)
-            if m:
-                row = await resolve_image(m.group(1))
-                if row:
-                    ok_img = await media.upload_and_send(
-                        CLIENT, group, Path(row[0]), msg_id=msg_id,
-                        base_url=CONFIG.get("bot", "image_base", fallback=""),
-                        public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
-                    )
-                    if ok_img:
-                        sent = True
-                    MEMORY.mark_bot_spoke(group)
-                    log.info("群发图 %s: %s", group[:8], row[1][:30])
-                else:
-                    log.info("想发的图没找到：%r", m.group(1))
-                part = IMG_MARKER.sub("", part).strip()
-                if not part:
-                    continue
+    lock = GROUP_SEND_LOCKS.setdefault(group, asyncio.Lock())
+    sent_count = 0
+    sent_image = False
+    async with lock:
+        for i, part in enumerate(bubbles):
+            if _should_interrupt(group, since):
+                log.info("新消息打断，剩余 %d 条不发 group=%s", len(bubbles) - i, group[:8])
+                break
+            try:
+                m = IMG_MARKER.search(part)
+                if m:
+                    row = await resolve_image(m.group(1))
+                    if row:
+                        ok_img = await media.upload_and_send(
+                            CLIENT, group, Path(row[0]), msg_id=msg_id,
+                            base_url=CONFIG.get("bot", "image_base", fallback=""),
+                            public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
+                        )
+                        if ok_img:
+                            sent_count += 1
+                            sent_image = True
+                        MEMORY.mark_bot_spoke(group)
+                        log.info("群发图 %s: %s", group[:8], row[1][:30])
+                    else:
+                        log.info("想发的图没找到：%r", m.group(1))
+                    part = IMG_MARKER.sub("", part).strip()
+                    if not part:
+                        continue
 
-            if "qqbot-at-user" in part:
-                # QQ 的 @ 标签只在 markdown 消息里渲染
-                await CLIENT.group.send_markdown(group, part, msg_id=msg_id if i == 0 else None)
-            else:
-                await CLIENT.group.send_message(group, part, msg_id=msg_id if i == 0 else None)
-            _record_own(group, part)
-            MEMORY.mark_bot_spoke(group)
-            sent = True
-            log.info("群回复 %s: %s", group[:8], part[:80])
-        except (qqexc.BadSituation, qqexc.BadArguments, qqexc.UnknownError) as exc:
-            msg = str(exc)
-            log.warning("发送被拒（%s）：%s", group[:8], msg[:200])
-            # 只有"这个群永远发不进去"才关掉主动性；禁言/频控是临时的，别把暖场整个停掉
-            if any(k in msg for k in PERMANENT_SEND_ERRORS):
-                MEMORY.set_group_flag(group, "proactive_ok", False)
-                log.warning("这个群发不进去，关掉主动发言 group=%s", group[:8])
-            break
-        except Exception:
-            log.exception("发送失败 group=%s", group[:8])
-            break
-        if i + 1 < len(bubbles):
-            # 补一句的节奏：短句抢着发，长句稍顿一下
-            gap = 0.6 + min(len(part), 40) * 0.03 + random.uniform(0.2, 1.4)
-            await asyncio.sleep(min(3.0, gap))
-    if sent:
+                if "qqbot-at-user" in part:
+                    # QQ 的 @ 标签只在 markdown 消息里渲染
+                    await CLIENT.group.send_markdown(group, part, msg_id=msg_id if i == 0 else None)
+                else:
+                    await CLIENT.group.send_message(group, part, msg_id=msg_id if i == 0 else None)
+                _record_own(group, part)
+                MEMORY.mark_bot_spoke(group)
+                sent_count += 1
+                log.info("群回复 %s: %s", group[:8], part[:80])
+            except (qqexc.BadSituation, qqexc.BadArguments, qqexc.UnknownError) as exc:
+                msg = str(exc)
+                log.warning("发送被拒（%s）：%s", group[:8], msg[:200])
+                # 只有"这个群永远发不进去"才关掉主动性；禁言/频控是临时的，别把暖场整个停掉
+                if any(k in msg for k in PERMANENT_SEND_ERRORS):
+                    MEMORY.set_group_flag(group, "proactive_ok", False)
+                    log.warning("这个群发不进去，关掉主动发言 group=%s", group[:8])
+                break
+            except Exception:
+                log.exception("发送失败 group=%s", group[:8])
+                break
+            if i + 1 < len(bubbles):
+                # 补一句的节奏：短句抢着发，长句稍顿一下
+                gap = 0.6 + min(len(part), 40) * 0.03 + random.uniform(0.2, 1.4)
+                gap = min(3.0, gap)
+                log.debug("气泡间隔 %.2fs group=%s", gap, group[:8])
+                await asyncio.sleep(gap)
+    if sent_count:
         hist = LAST_BUBBLES.setdefault(group, [])
-        hist.append(len(bubbles))
+        hist.append(sent_count)
         del hist[:-6]
         ih = LAST_IMAGES.setdefault(group, [])
-        ih.append(1 if "[[img:" in (text or "") else 0)
+        ih.append(1 if sent_image else 0)
         del ih[:-6]
-    return sent
+    return sent_count > 0
 
 
 def _record_own(group, text):
@@ -437,6 +469,7 @@ def _fresh_rows(group: str) -> list:
     return [r for r in rows if r[2] > since] or rows[-8:]
 
 
+OTHER_BOT_NAMES = {"Rantindom机器人", "神", "都报"}
 MEME_WORDS = ("大肥鱼", "白饭", "token", "服务器繁忙", "得加钱", "誓死", "终有一天",
               "V我50", "上错模型", "吃白饭", "蹭饭", "小鱼干")
 
