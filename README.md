@@ -105,6 +105,18 @@ echo "多行也行" | qq-send <group_openid>
 必须带 `x-token`（值在 `config.ini [send] token`）。token 是防止公网乱发的唯一屏障——
 这台机器的 nginx 把整个域名反代到 3704，`/send` 公网可达，所以**别把 token 贴到聊天记录里**。
 
+## 本地测试（不往群里发）
+
+```bash
+TOKEN=$(awk -F' = ' '/^token =/{print $2}' /opt/dsh-bot/config.ini)
+curl -s localhost:3704/debug_reply -H "x-token: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"text":"大肥鱼","task":"ambient","reset":true}'
+```
+
+- `task`：`ambient`（非 @）或 `addressed`（被 @）
+- `reset: true` 重开一个测试会话；不传就沿用上下文
+- 只返回 `reply`，不发送到 QQ；用来做人设/接话回归
+
 ## 排障
 
 | 现象 | 看什么 |

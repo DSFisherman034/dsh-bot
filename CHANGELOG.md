@@ -331,3 +331,11 @@
   明确要求「必须回，不要 SKIP」；其他机器人不算。
 - config：去掉 `quiet_hours`，加 `heartbeat_enabled=false`。
 - 需要重启。
+
+## 2026-10-28 · v0.31 本地测试口 `/debug_reply`
+
+- 不想在群里演测试消息：加 token 保护的 `POST /debug_reply`，喂 `{text, task, reset}`，
+  直接返回 DSH 回复，不往 QQ 发。
+- `task=ambient/addressed`；`reset=true` 重开测试会话；用 `x-token`（config 的 send token）。
+- README 补了 curl 用法；只用于人设/接话回归。
+- 需要重启。

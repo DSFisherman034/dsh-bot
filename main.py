@@ -731,6 +731,36 @@ async def main():
         ok = await send_group(group, text, msg_id=None)
         return {"ok": ok, **({} if ok else {"error": "send failed"})}
 
+    @CLIENT.app.app.post("/debug_reply")
+    async def debug_reply(request: Request):
+        """本地测试口：喂一条消息，返回它会发的话；不往群里发。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        task = (body.get("task") or "ambient").strip()
+        if not text:
+            return {"ok": False, "error": "text required"}
+        if BRIDGE is None:
+            return {"ok": False, "error": "bridge not ready"}
+        if body.get("reset"):
+            BRIDGE.sessions.pop("debug:persona", None)
+        if task == "addressed":
+            instruction = "最后一条是 深海渔民 @ 你，回他一句。"
+        else:
+            instruction = ("没人 @ 你。能接就接，别太保守；只有完全无关、"
+                           "或者说了只会显得多余，才输出 SKIP。")
+        prompt = build_dsh_prompt(
+            "debug:persona", instruction,
+            fresh=[("深海渔民", text, time.time(), False)],
+        )
+        try:
+            reply = await BRIDGE.prompt("debug:persona", prompt)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "reply": reply}
+
     @CLIENT.app.app.get("/groups")
     async def groups_api():
         return {"groups": MEMORY.active_groups(minutes=60 * 24 * 7)}
