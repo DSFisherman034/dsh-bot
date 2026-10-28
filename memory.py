@@ -83,7 +83,7 @@ class Memory:
         """返回 [(author, content, ts, is_bot), ...]，按时间正序。"""
         rows = self.conn.execute(
             "SELECT author, content, ts, is_bot FROM messages"
-            " WHERE group_openid=? AND ts >= ? ORDER BY ts DESC LIMIT ?",
+            " WHERE group_openid=? AND ts >= ? ORDER BY ts DESC, id DESC LIMIT ?",
             (group, time.time() - minutes * 60, limit),
         ).fetchall()
         return list(reversed(rows))
@@ -97,7 +97,7 @@ class Memory:
     def last_bot_message(self, group):
         row = self.conn.execute(
             "SELECT content, ts FROM messages WHERE group_openid=? AND is_bot=1"
-            " ORDER BY ts DESC LIMIT 1",
+            " ORDER BY ts DESC, id DESC LIMIT 1",
             (group,),
         ).fetchone()
         return row  # (content, ts) or None
@@ -111,10 +111,45 @@ class Memory:
         """某时间点之后的非 bot 消息，按时间正序；给群记忆总结用。"""
         rows = self.conn.execute(
             "SELECT author, content, ts, is_bot FROM messages"
-            " WHERE group_openid=? AND ts>? AND is_bot=0 ORDER BY ts DESC LIMIT ?",
+            " WHERE group_openid=? AND ts>? AND is_bot=0 ORDER BY ts DESC, id DESC LIMIT ?",
             (group, ts, limit),
         ).fetchall()
         return list(reversed(rows))
+
+    def max_id(self, group):
+        """该群最后一条消息的自增 id；没有就 0。"""
+        row = self.conn.execute(
+            "SELECT MAX(id) FROM messages WHERE group_openid=?", (group,)
+        ).fetchone()
+        return row[0] or 0
+
+    def messages_after_id(self, group, after_id, limit=20):
+        """id 游标之后的增量，按 id 正序：[(id, author, content, ts, is_bot), ...]。
+
+        用 id 而不用 ts 做游标：ts 是平台时间、精度到秒，且实测比本机慢 1-2 秒，
+        拿本机时间当 since 会漏掉刚到的消息。
+        """
+        rows = self.conn.execute(
+            "SELECT id, author, content, ts, is_bot FROM messages"
+            " WHERE group_openid=? AND id>? ORDER BY id DESC LIMIT ?",
+            (group, after_id, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+    def has_external_since(self, group, after_id, self_names):
+        """id 之后有没有"外部"消息（真人或其他 bot）；自己发的不算。
+
+        续轮判断必须排除自己：机器人回复的 ts 永远晚于本轮 prompt 时间，
+        以前用 MAX(ts) 比较会导致每轮都续、自问自答。
+        """
+        names = tuple(self_names)
+        marks = ",".join("?" * len(names))
+        row = self.conn.execute(
+            "SELECT 1 FROM messages WHERE group_openid=? AND id>?"
+            f" AND NOT (is_bot=1 AND author IN ({marks})) LIMIT 1",
+            (group, after_id, *names),
+        ).fetchone()
+        return bool(row)
 
     # ---------- 群事件记忆 ----------
 
@@ -132,7 +167,7 @@ class Memory:
         """[(ts, kind, text), ...]，按时间正序，最近的 limit 条。"""
         rows = self.conn.execute(
             "SELECT ts, kind, text FROM memories WHERE group_openid=?"
-            " ORDER BY ts DESC LIMIT ?",
+            " ORDER BY ts DESC, id DESC LIMIT ?",
             (group, limit),
         ).fetchall()
         return list(reversed(rows))

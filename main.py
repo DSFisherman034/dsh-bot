@@ -66,6 +66,9 @@ BRAIN: Brain | None = None
 CLIENT: QQClient | None = None
 BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
+# 消息 id 游标：给 DSH 的增量按 id 算，不用本机时间（平台时间慢 1-2 秒会漏消息）
+LAST_SEEN_ID: dict[str, int] = {}
+PENDING_SEEN: dict[str, int] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
 GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
@@ -284,8 +287,9 @@ async def _ambient_round(group):
         log.exception("插话回合出错 group=%s", group[:8])
     finally:
         AMBIENT_PENDING.pop(group, None)
-        # 这一轮处理期间又来了新消息 → 再开一个窗口
-        if MEMORY.last_activity(group) > LAST_PROMPT_TS.get(group, 0):
+        # 这一轮处理期间又有了外部消息（真人/其他 bot）才再开一个窗口。
+        # 不能拿 MAX(ts) 比：自己刚发的回复也在这张表里，会导致无限自问自答。
+        if MEMORY.has_external_since(group, LAST_SEEN_ID.get(group, 0), SELF_NAMES):
             schedule_ambient(group)
 
 
@@ -468,10 +472,22 @@ def _ts(iso: str) -> float:
 
 
 def _fresh_rows(group: str) -> list:
-    """这一轮要喂给 DSH 的增量转录（上次 prompt 之后的消息）。"""
-    since = LAST_PROMPT_TS.get(group, 0)
-    rows = MEMORY.recent_messages(group, minutes=180, limit=20)
-    return [r for r in rows if r[2] > since] or rows[-8:]
+    """这一轮要喂给 DSH 的增量转录。
+
+    游标是消息自增 id，不是时间：平台 ts 精度到秒且比本机慢 1-2 秒，
+    用本机 time.time() 当 since 会把刚到的消息当成"旧的"丢掉。
+    """
+    last = PENDING_SEEN.get(group) or LAST_SEEN_ID.get(group)
+    if last is None:
+        rows = MEMORY.recent_messages(group, minutes=180, limit=20)
+        if rows:
+            PENDING_SEEN[group] = MEMORY.max_id(group)
+        return rows[-8:] if rows else []
+    rows = MEMORY.messages_after_id(group, last, limit=20)
+    if rows:
+        PENDING_SEEN[group] = rows[-1][0]
+        return [(author, content, ts, is_bot) for _id, author, content, ts, is_bot in rows]
+    return MEMORY.recent_messages(group, minutes=180, limit=8)
 
 
 SELF_NAMES = {"DSH", "大肥鱼", "小鲸鱼", "鱼"}
@@ -745,6 +761,8 @@ async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
             resume_sid=MEMORY.get_state(key),
             images=images,
         )
+        # 这一批消息已经进了 DSH 会话，游标才推进；失败不推进，下一轮重发
+        LAST_SEEN_ID[group] = PENDING_SEEN.pop(group, LAST_SEEN_ID.get(group, 0))
         sid = BRIDGE.sessions.get(group)
         if sid and MEMORY.get_state(key) != sid:
             MEMORY.set_state(key, sid)
@@ -752,6 +770,7 @@ async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
             log.info("DSH 带图 %s 张（共 %d 字节）group=%s",
                      len(images), sum(len(d) for _m, d in images), group[:8])
     except Exception:
+        PENDING_SEEN.pop(group, None)  # 没送进去，下一轮重发这一批
         log.exception("DSH 桥调用失败")
         return None
     if not text:
