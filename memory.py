@@ -136,6 +136,18 @@ class Memory:
         ).fetchall()
         return list(reversed(rows))
 
+    def last_external_msg_id(self, group, after_id=0, self_names=()):
+        """最近一条外部消息的平台 msg_id（引用用）；没有就 None。"""
+        names = tuple(self_names)
+        marks = ",".join("?" * len(names)) if names else "NULL"
+        row = self.conn.execute(
+            "SELECT msg_id FROM messages WHERE group_openid=? AND id>?"
+            f" AND NOT (is_bot=1 AND author IN ({marks})) AND msg_id IS NOT NULL"
+            " ORDER BY id DESC LIMIT 1",
+            (group, after_id, *names),
+        ).fetchone()
+        return row[0] if row else None
+
     def has_external_since(self, group, after_id, self_names):
         """id 之后有没有"外部"消息（真人或其他 bot）；自己发的不算。
 

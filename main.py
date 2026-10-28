@@ -276,13 +276,15 @@ async def _ambient_round(group):
         await asyncio.sleep(debounce)
         since = time.time()
 
+        since_id = LAST_SEEN_ID.get(group, 0)
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
             log.info("插话跳过[模型决定不说] group=%s", group[:8])
             return
 
         await asyncio.sleep(_typing_delay(text))
-        await send_group(group, text, msg_id=None, since=since)
+        quote = MEMORY.last_external_msg_id(group, since_id, SELF_NAMES) if _want_quote(-0.1) else None
+        await send_group(group, text, msg_id=None, since=since, quote_id=quote)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
     finally:
@@ -325,6 +327,7 @@ async def reply_group(group, task, who, msg_id=None, message=None):
     # 被 @ 时才把图本身交给 DSH：它真的能看，插话/暖场就够了文字描述
     since = time.time()
     with_images = CONFIG.getboolean("dsh", "attach_images", fallback=True)
+    quote = message.id if (message is not None and _want_quote()) else None
     text = await ask_dsh(group, f"最后一条是 {who} @ 你，回他一句。", who, message,
                          with_images=with_images)
 
@@ -335,7 +338,7 @@ async def reply_group(group, task, who, msg_id=None, message=None):
         log.info("模型选择沉默 task=%s", task)
         return
     await asyncio.sleep(_typing_delay(text))
-    await send_group(group, text, msg_id=msg_id, since=since)
+    await send_group(group, text, msg_id=msg_id, since=since, quote_id=quote)
 
 
 # ---------------- 发送 ----------------
@@ -374,7 +377,7 @@ def _should_interrupt(group, since):
     return any(k in text for k in keys)
 
 
-async def send_group(group, text, msg_id=None, since=None) -> bool:
+async def send_group(group, text, msg_id=None, since=None, quote_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
@@ -415,15 +418,30 @@ async def send_group(group, text, msg_id=None, since=None) -> bool:
                     if not part:
                         continue
 
-                if "qqbot-at-user" in part:
-                    # QQ 的 @ 标签只在 markdown 消息里渲染
-                    await CLIENT.group.send_markdown(group, part, msg_id=msg_id if i == 0 else None)
-                else:
-                    await CLIENT.group.send_message(group, part, msg_id=msg_id if i == 0 else None)
+                quote = quote_id if i == 0 else None
+                use_md = "qqbot-at-user" in part
+                try:
+                    if use_md:
+                        # QQ 的 @ 标签只在 markdown 消息里渲染
+                        await CLIENT.group.send_markdown(
+                            group, part, msg_id=msg_id if i == 0 else None,
+                            quote_message_id=quote)
+                    else:
+                        await CLIENT.group.send_message(
+                            group, part, msg_id=msg_id if i == 0 else None,
+                            quote_message_id=quote)
+                except Exception:
+                    if not quote:
+                        raise
+                    log.warning("引用发送失败，退回不带引用 group=%s", group[:8])
+                    if use_md:
+                        await CLIENT.group.send_markdown(group, part, msg_id=msg_id if i == 0 else None)
+                    else:
+                        await CLIENT.group.send_message(group, part, msg_id=msg_id if i == 0 else None)
                 _record_own(group, part)
                 MEMORY.mark_bot_spoke(group)
                 sent_count += 1
-                log.info("群回复 %s: %s", group[:8], part[:80])
+                log.info("群回复%s %s: %s", "（引用）" if quote else "", group[:8], part[:80])
             except (qqexc.BadSituation, qqexc.BadArguments, qqexc.UnknownError) as exc:
                 msg = str(exc)
                 log.warning("发送被拒（%s）：%s", group[:8], msg[:200])
@@ -455,6 +473,15 @@ def _record_own(group, text):
     MEMORY.add_message(
         group, None, CONFIG.get("bot", "name", fallback="DSH"), "self", text, is_bot=True
     )
+
+
+def _want_quote(boost: float = 0.0) -> bool:
+    """这一条要不要引用上文。不是每条都引，量在 config [behavior] quote_chance。"""
+    try:
+        base = CONFIG.getfloat("behavior", "quote_chance", fallback=0.3)
+    except Exception:
+        base = 0.3
+    return random.random() < min(0.9, max(0.0, base + boost))
 
 
 def _typing_delay(text: str) -> float:
