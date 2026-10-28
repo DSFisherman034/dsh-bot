@@ -698,7 +698,7 @@ def _fresh_rows(group: str) -> list:
         rows = MEMORY.recent_messages(group, minutes=180, limit=20)
         if rows:
             PENDING_SEEN[group] = MEMORY.max_id(group)
-        return rows[-8:] if rows else []
+        return rows[-CTX_KEEP:] if rows else []
     rows = MEMORY.messages_after_id(group, last, limit=20)
     if rows:
         PENDING_SEEN[group] = rows[-1][0]
