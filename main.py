@@ -276,6 +276,11 @@ async def _ambient_round(group):
         await asyncio.sleep(debounce)
         since = time.time()
 
+        reason = ambient_skip_reason(group)
+        if reason:
+            log.info("插话不开口[%s] group=%s", reason, group[:8])
+            return
+
         since_id = LAST_SEEN_ID.get(group, 0)
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
@@ -295,6 +300,50 @@ async def _ambient_round(group):
             schedule_ambient(group)
 
 
+_AT_ME_WORDS = ("DSH", "大肥鱼", "小鲸鱼")
+
+
+def _addressed_to_others(text: str) -> bool:
+    """这条消息像不像在 @ 别人（而不是你）。"""
+    text = text or ""
+    if not text or any(w in text for w in _AT_ME_WORDS):
+        return False
+    return "@" in text
+
+
+def _looks_like_followup(rows, last_bot_ts) -> bool:
+    """最后一条是不是在接你的话/问你。"""
+    if not last_bot_ts or time.time() - last_bot_ts >= 180:
+        return False
+    last_other = next((r for r in reversed(rows) if not r[3]), None)
+    if not last_other:
+        return False
+    content = last_other[1] or ""
+    return any(k in content for k in (
+        "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
+        "是不是", "能不能", "有没有", "吗",
+    ))
+
+
+def ambient_skip_reason(group: str) -> str | None:
+    """这轮插话是不是压根不该开——省一次 DSH 调用，也压住"每句都回"。"""
+    rows = MEMORY.recent_messages(group, minutes=30, limit=4)
+    if not rows:
+        return "群里没消息"
+    last_author, last_content, _ts_, last_is_bot = rows[-1]
+    if last_is_bot:
+        return "最后一条是自己说的"
+    last = MEMORY.last_bot_message(group)
+    if _looks_like_followup(rows, last[1] if last else 0):
+        return None
+    if _addressed_to_others(last_content):
+        return "最后一条 @ 的是别人"
+    cooldown = CONFIG.getint("behavior", "ambient_cooldown", fallback=90)
+    if last and time.time() - last[1] < cooldown:
+        return f"自己 {int(time.time() - last[1])} 秒前刚说过话"
+    return None
+
+
 def ambient_instruction(group: str) -> str:
     hint = ""
     last = MEMORY.last_bot_message(group)
@@ -303,23 +352,36 @@ def ambient_instruction(group: str) -> str:
         hint = f"你 {ago} 秒前刚说过：「{last[0][:40]}」。刚说过的话不要重复。\n"
 
     rows = MEMORY.recent_messages(group, minutes=30, limit=6)
-    last_other = next((r for r in reversed(rows) if not r[3]), None)
-    followup = False
-    if last and last_other and time.time() - last[1] < 180:
-        content = last_other[1] or ""
-        followup = any(k in content for k in (
-            "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
-            "是不是", "能不能", "有没有", "吗",
-        ))
-    if followup:
+    if _looks_like_followup(rows, last[1] if last else 0):
         return (
             "最后一条明显是在接你刚才的话、或者在问你，**必须回**，不要 SKIP。"
             "顺着对方的问题答，别装死。\n" + hint
         )
+
+    last_other = next((r for r in reversed(rows) if not r[3]), None)
+    who = (last_other[0] or "某人") if last_other else "某人"
+    if last_other and _addressed_to_others(last_other[1]):
+        return (
+            f"最后一条是 {who} 在 @ 别人，不是对你说的。"
+            "除非你能补一句真正有用的信息，否则输出 SKIP。\n" + hint
+        )
+
+    # 上一条是另一个 bot 刚说的、最后一条是短句 → 多半是在跟那个 bot 打招呼/回它
+    prev = rows[-2] if len(rows) >= 2 else None
+    if (prev and prev[3] and (prev[0] or "") not in SELF_NAMES
+            and last_other and last_other is rows[-1]
+            and len(last_other[1] or "") <= 12
+            and time.time() - prev[2] <= 90):
+        who_prev = prev[0] or "另一个机器人"
+        return (
+            f"最后一条像是在回 {who_prev}，不是在跟你说话。"
+            "除非它明确点你的名字，否则输出 SKIP。\n" + hint
+        )
+
     return (
-        "没人 @ 你。能接就接，别太保守：话题跟你有关、你能接一句有意思的、或者对方在等你接，就说；"
-        "只有完全无关、或者说了只会显得多余，才输出 SKIP。"
-        + ("\n" + hint if hint else "")
+        f"没人 @ 你。先判断最后一条（{who} 说的）是不是在跟你说："
+        "如果是在跟别人说话、或者在接别人的话，就输出 SKIP。"
+        "只有你能补一句真正有用或好笑的，或者对方明显在等你，才接；不确定就 SKIP。\n" + hint
     )
 
 
