@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS state (
     key TEXT PRIMARY KEY,
     value TEXT
 );
+CREATE TABLE IF NOT EXISTS memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_openid TEXT NOT NULL,
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'event',
+    text TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memories_group_ts ON memories(group_openid, ts);
 """
 
 
@@ -93,7 +101,38 @@ class Memory:
 
     def prune(self, days=7):
         self.conn.execute("DELETE FROM messages WHERE ts < ?", (time.time() - days * 86400,))
+        self.conn.execute("DELETE FROM memories WHERE ts < ?", (time.time() - 60 * 86400,))
         self.conn.commit()
+
+    def messages_after(self, group, ts, limit=80):
+        """某时间点之后的非 bot 消息，按时间正序；给群记忆总结用。"""
+        rows = self.conn.execute(
+            "SELECT author, content, ts, is_bot FROM messages"
+            " WHERE group_openid=? AND ts>? AND is_bot=0 ORDER BY ts DESC LIMIT ?",
+            (group, ts, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+    # ---------- 群事件记忆 ----------
+
+    def add_memory(self, group, text, kind="event", ts=None):
+        text = (text or "").strip()
+        if not text:
+            return
+        self.conn.execute(
+            "INSERT INTO memories(group_openid,ts,kind,text) VALUES (?,?,?,?)",
+            (group, ts or time.time(), kind, text[:500]),
+        )
+        self.conn.commit()
+
+    def recent_memories(self, group, limit=8):
+        """[(ts, kind, text), ...]，按时间正序，最近的 limit 条。"""
+        rows = self.conn.execute(
+            "SELECT ts, kind, text FROM memories WHERE group_openid=?"
+            " ORDER BY ts DESC LIMIT ?",
+            (group, limit),
+        ).fetchall()
+        return list(reversed(rows))
 
     # ---------- 群状态 ----------
 
@@ -185,5 +224,6 @@ class Memory:
         return {
             "messages": self.conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
             "groups": self.conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0],
+            "memories": self.conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0],
             "db": self.path,
         }

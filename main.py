@@ -64,6 +64,7 @@ CLIENT: QQClient | None = None
 BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
+LAST_IMAGES: dict[str, list[int]] = {}
 
 
 # ---------------- 工具 ----------------
@@ -351,6 +352,9 @@ async def send_group(group, text, msg_id=None) -> bool:
         hist = LAST_BUBBLES.setdefault(group, [])
         hist.append(len(bubbles))
         del hist[:-6]
+        ih = LAST_IMAGES.setdefault(group, [])
+        ih.append(1 if "[[img:" in (text or "") else 0)
+        del ih[:-6]
     return sent
 
 
@@ -407,6 +411,16 @@ def bubble_hint(group: str) -> str:
     return "普通闲聊大约一半适合分两条；这轮看情况，别硬拆。"
 
 
+def image_hint(group: str) -> str:
+    """把配图比例往 1/3 左右推：太久没配就提醒，太密就压。"""
+    hist = LAST_IMAGES.get(group, [])[-4:]
+    if len(hist) >= 4 and sum(hist) == 0:
+        return "你最近四条都没配图，这轮如果图能加分，就配一张（[[img:描述]]）；别硬配。"
+    if sum(hist[-3:]) >= 2:
+        return "你最近配图有点多，这轮别配，先说话。"
+    return "大约每 3 条回复可以配一张图；有合适的就配，没有别硬找。"
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -421,13 +435,27 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
     head = "以下是群里刚才的消息（时间 24 小时制）：\n" + "\n".join(lines) if lines else "群里还没有聊天记录。"
+    mem = MEMORY.recent_memories(group, limit=8)
+    mem_block = ""
+    if mem:
+        mem_lines = [
+            f"[{datetime.fromtimestamp(ts).strftime('%m-%d %H:%M')}] {text}"
+            for ts, _kind, text in mem
+        ]
+        mem_block = (
+            "群内记忆（之前发生的事，参考就好，不要主动复述）：\n"
+            + "\n".join(mem_lines) + "\n\n"
+        )
     tail = (
         "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
         "决定不说话就只输出 SKIP。\n"
         "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
         "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。"
     )
-    return f"{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n{bubble_hint(group)}\n\n{tail}"
+    return (
+        f"{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{tail}"
+    )
 
 
 def collect_prompt_images(fresh) -> list[tuple[str, bytes]]:
@@ -611,6 +639,59 @@ HEARTBEAT_INSTRUCTION = (
 )
 
 
+SUMMARY_INTERVAL = 1800
+SUMMARY_MIN_MESSAGES = 12
+
+
+async def summarize_group(group: str) -> int:
+    """把一批群消息压成 1-3 条事件记忆，存库；失败不推进游标。"""
+    if BRAIN is None:
+        return 0
+    since = float(MEMORY.get_state(f"mem:{group}") or 0)
+    rows = MEMORY.messages_after(group, since, limit=80)
+    if len(rows) < SUMMARY_MIN_MESSAGES:
+        return 0
+    lines = []
+    for author, content, ts, _ in rows:
+        clock = datetime.fromtimestamp(ts).strftime("%H:%M")
+        lines.append(f"[{clock}] {author}: {(content or '').strip()[:160]}")
+    system = (
+        "你是群聊记录员。从下面的群聊里提取 1-3 条值得以后记住的群内事件/约定/变化"
+        "（谁做了什么、群里发生了什么），每条一句话，只写事实，不评价、不编造，"
+        "不要 Markdown，不要编号。没有就只输出 NONE。"
+    )
+    try:
+        text = await BRAIN.complete(
+            system, "群聊：\n" + "\n".join(lines), temperature=0.2, max_tokens=240
+        )
+    except Exception:
+        log.exception("群记忆总结调用失败 group=%s", group[:8])
+        return 0
+    events = []
+    for line in (text or "").splitlines():
+        line = line.strip().lstrip("-•* ").strip()
+        if not line or line.upper() == "NONE":
+            continue
+        events.append(line)
+    for e in events[:3]:
+        MEMORY.add_memory(group, e)
+    MEMORY.set_state(f"mem:{group}", str(rows[-1][2]))
+    return len(events[:3])
+
+
+async def memory_loop():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            for group in MEMORY.known_groups():
+                n = await summarize_group(group)
+                if n:
+                    log.info("群记忆 +%d 条 group=%s", n, group[:8])
+        except Exception:
+            log.exception("群记忆总结出错")
+        await asyncio.sleep(SUMMARY_INTERVAL)
+
+
 async def heartbeat_loop():
     interval = CONFIG.getint("behavior", "heartbeat_interval", fallback=240)
     idle = CONFIG.getint("behavior", "heartbeat_idle", fallback=900)
@@ -787,6 +868,7 @@ async def main():
     log.info("DSH Bot 启动 appid=%s %s:%s model=%s", appid, host, port, BRAIN.model)
     asyncio.create_task(start_bridge())
     asyncio.create_task(heartbeat_loop())
+    asyncio.create_task(memory_loop())
     asyncio.create_task(housekeeping_loop())
     await CLIENT.run()
 
