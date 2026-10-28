@@ -1,0 +1,51 @@
+[
+  {
+    "name": "nekowhale",
+    "kind": "local",
+    "url": "https://kiriyuki.com/meme/kit/nekowhale.json",
+    "license": "CC BY-NC 4.0",
+    "author": "可以叫我云大人 / kiriyuki.com",
+    "enabled": true,
+    "note": "322 张大肥鱼/GPT娘，已导入"
+  },
+  {
+    "name": "dsh-meme",
+    "kind": "local",
+    "url": "https://github.com/yyh-001/dsh-meme",
+    "license": "MIT code；图包按包内许可",
+    "enabled": true,
+    "note": "24 张大肥鱼，已导入"
+  },
+  {
+    "name": "dsh-meme-packs",
+    "kind": "catalog",
+    "url": "https://github.com/yyh-001/dsh-meme-packs",
+    "license": "per pack",
+    "enabled": false,
+    "note": "社区图库市场，先存入口"
+  },
+  {
+    "name": "justmeme",
+    "kind": "api",
+    "url": "https://justmeme.wtf",
+    "license": "check",
+    "enabled": false,
+    "note": "英文 meme 模板 API，先存入口"
+  },
+  {
+    "name": "fabiaoqing",
+    "kind": "site",
+    "url": "https://fabiaoqing.com",
+    "license": "unknown",
+    "enabled": false,
+    "note": "中文表情站，无官方 API，不建议爬"
+  },
+  {
+    "name": "doutula",
+    "kind": "site",
+    "url": "https://www.doutula.com",
+    "license": "unknown",
+    "enabled": false,
+    "note": "中文表情站，无官方 API，不建议爬"
+  }
+]

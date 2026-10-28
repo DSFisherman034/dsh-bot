@@ -13,6 +13,7 @@
 
 import asyncio
 import configparser
+import json
 import logging
 import random
 import re
@@ -40,6 +41,7 @@ BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
 # [[img:3478444e]] 精确哈希，或 [[img:震惊脸]] 按描述找
 IMG_MARKER = re.compile(r"\[\[img:([^\[\]\n]{1,60})\]\]")
+IMG_SEARCH_RE = re.compile(r"\[\[img-search:([^\[\]\n]{1,80})\]\]")
 IMG_SCOPE_RE = re.compile(r"\[\[img-scope:([^\[\]\n|]{1,60})\|([^\[\]\n]{1,120})\]\]")
 IMG_HASH_RE = re.compile(r"h=([0-9a-f]{8})")
 
@@ -370,6 +372,7 @@ def _should_interrupt(group, since):
 
 async def send_group(group, text, msg_id=None, since=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
+    text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
     if not text.strip():
         return False
@@ -518,7 +521,8 @@ def image_library_hint(limit=12) -> str:
         for _h, desc, scope in rows
     ]
     return ("图库（选图前先看适用范围；嘲讽/互损图只在朋友互损时用，"
-            "不用于自己被调侃、严肃、安慰、陌生人）：\n" + "\n".join(lines))
+            "不用于自己被调侃、严肃、安慰、陌生人；想按情绪/场景找更多，用 [[img-search:描述]]）：\n"
+            + "\n".join(lines))
 
 
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
@@ -551,6 +555,8 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "决定不说话就只输出 SKIP。\n"
         "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
         "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。\n"
+        "想按情绪/场景搜图，就写 [[img-search:描述或情绪]]（例如 [[img-search:摸鱼]]）；"
+        "系统会搜索图库并发出最像的一张。这不是外部工具，不需要审批，也不要说“我没有搜索工具”。\n"
         "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
         "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
@@ -663,6 +669,39 @@ async def match_image(query: str):
         return best, best_score
     log.info("按描述找图没找到（字面）：%r（最高 %.2f）", query, best_score)
     return None
+
+
+async def search_images(query: str, limit: int = 5):
+    """按描述/情绪搜图库，返回 top-N（含 hash/desc/scope/score）。"""
+    limit = max(1, min(int(limit), 20))
+    rows = MEMORY.images_with_emb()
+    if not rows:
+        return []
+    meta = {h: (d, s) for h, d, s in MEMORY.image_library(1000)}
+    model = CONFIG.get("ai", "embedding_model", fallback="").strip()
+    results = []
+    if model:
+        rows = await _ensure_embeddings(rows)
+        vecs = await media.embed_texts(
+            [query], CONFIG.get("ai", "base_url").strip(),
+            CONFIG.get("ai", "api_key").strip(), model, timeout=8.0,
+        )
+        if vecs:
+            for h, _path, desc, emb in rows:
+                if not emb:
+                    continue
+                score = media.cosine(vecs[0], media.unpack_vec(emb))
+                d, s = meta.get(h, (desc, ""))
+                results.append({"hash": h, "desc": d or desc or "", "scope": s or "", "score": score})
+    if not results:
+        for h, _path, desc, _emb in rows:
+            d, s = meta.get(h, (desc, ""))
+            results.append({
+                "hash": h, "desc": d or desc or "", "scope": s or "",
+                "score": media.local_score(query, desc or ""),
+            })
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:limit]
 
 
 async def resolve_image(token: str):
@@ -953,6 +992,46 @@ async def main():
                 for h, d, s in rows
             ]
         }
+
+    @CLIENT.app.app.get("/image_search")
+    async def image_search(request: Request):
+        """按描述/情绪搜图库：GET /image_search?q=摸鱼&limit=5，token 保护。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        q = (request.query_params.get("q") or "").strip()
+        if not q:
+            return {"ok": False, "error": "q required"}
+        try:
+            limit = int(request.query_params.get("limit", "5"))
+        except ValueError:
+            limit = 5
+        results = await search_images(q, limit)
+        return {
+            "ok": True,
+            "query": q,
+            "results": [
+                {
+                    "hash": r["hash"][:8],
+                    "desc": r["desc"],
+                    "scope": r["scope"],
+                    "score": round(r["score"], 3),
+                }
+                for r in results
+            ],
+        }
+
+    @CLIENT.app.app.get("/image_sources")
+    async def image_sources(request: Request):
+        """返回图源登记表；后加的源先存入口，不急着接。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        try:
+            sources = json.loads((BASE_DIR / "image_sources.json").read_text(encoding="utf-8"))
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "sources": sources}
 
     @CLIENT.app.app.post("/image_scope")
     async def image_scope_set(request: Request):

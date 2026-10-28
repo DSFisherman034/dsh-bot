@@ -60,7 +60,7 @@ DSH 每次请求前会重新读工作区的 AGENTS.md，把变更注入会话。
 `persona.md` 只剩兜底作用：DSH 桥挂掉时的本地模型、以及私信回复。它每次调用都查 mtime，改完立即生效。
 两份最好一起改，语气才一致，不然桥上桥下像两个人。
 
-当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.35，见 `CHANGELOG.md`）。想快速试兜底那份：
+当前人设：**小鲸鱼**（外号大肥鱼，2026-10-28 v0.36，见 `CHANGELOG.md`）。想快速试兜底那份：
 
 ```bash
 cd /opt/dsh-bot && /opt/qqbot/venv/bin/python - <<'PY'
@@ -123,6 +123,14 @@ echo "多行也行" | qq-send <group_openid>
 - 模型可另起一行写 `[[img-scope:图描述|适用范围]]` 更新，`send_group` 会解析并剥离，不发群。
 - 手动：`GET/POST /image_scope`（token），body `{"image":"hash 或描述","scope":"..."}`。
 - 发错图直接认，不解释后台。
+
+## 图库来源与搜索（v0.36）
+
+- 已导入 **nekowhale 322 张**（大肥鱼/GPT娘，CC BY-NC 4.0，作者：可以叫我云大人 / kiriyuki.com）
+  和 **dsh-meme 内置大肥鱼 24 张**（代码 MIT；图包许可见包内）。
+- 模型没有工具调用；要搜图就输出 `[[img-search:描述或情绪]]`，`send_group` 会搜索图库并发最像的一张，不需要审批。
+- 手动搜索：`GET /image_search?q=摸鱼&limit=5`（token），返回 hash/描述/scope/score。
+- 后续图源登记在 `image_sources.json`；`GET /image_sources` 查看，先存入口不急着接。
 
 ## 本地测试（不往群里发）
 

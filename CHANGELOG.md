@@ -388,3 +388,14 @@
 - 延迟来源：`_typing_delay` 最多 4s，气泡间隔最多 3s；15s 级间隔是独立插话回合
   （10s debounce + 模型 + typing），不是一次分五条。
 - 需要重启。
+
+## 2026-10-28 · v0.36 大肥鱼图库 322+24 + 搜索协议
+
+- 全量拉取 nekowhale 322 张（大肥鱼 286 + 大肥鱼/GPT娘 36；CC BY-NC 4.0，
+  作者：可以叫我云大人 / kiriyuki.com）和 dsh-meme 内置大肥鱼 24 张（代码 MIT）。
+- 图库统一进 `images` 表：desc + scope（情绪/标签/用法/方向/来源）+ embedding。
+- 搜索协议：模型输出 `[[img-search:描述或情绪]]`，`send_group` 转成图库检索并发最像的一张；
+  **不启用工具调用，不需要审批**。
+- 新增 `GET /image_search?q=...&limit=5`（token）和 `image_sources.json` 图源登记。
+- 模型提示词明确“没有外部工具，但可以用 img-search”，不再说“不能搜图”。
+- 需要重启。
