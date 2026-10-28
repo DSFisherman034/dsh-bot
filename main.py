@@ -190,9 +190,10 @@ async def handle_group(message, addressed: bool):
 
         if addressed:
             await reply_group(group, "addressed", message.author.username, msg_id=message.id, message=message)
-        elif is_bot_author:
-            log.debug("机器人消息，仅记入上下文 group=%s", group[:8])
+        elif is_bot_author and message.author.username in SELF_NAMES:
+            log.debug("自己发的消息，仅记入上下文 group=%s", group[:8])
         elif CONFIG.get("behavior", "reply_policy", fallback="full") == "full":
+            # 其他机器人和人类同地位：非 @ 也触发插话，允许机器人自己开聊。
             schedule_ambient(group)
         else:
             log.debug("非 @ 消息，仅记入上下文 group=%s", group[:8])
@@ -299,12 +300,11 @@ def ambient_instruction(group: str) -> str:
     last_other = next((r for r in reversed(rows) if not r[3]), None)
     followup = False
     if last and last_other and time.time() - last[1] < 180:
-        author, content = last_other[0], (last_other[1] or "")
-        if author not in OTHER_BOT_NAMES:
-            followup = any(k in content for k in (
-                "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
-                "是不是", "能不能", "有没有", "吗",
-            ))
+        content = last_other[1] or ""
+        followup = any(k in content for k in (
+            "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
+            "是不是", "能不能", "有没有", "吗",
+        ))
     if followup:
         return (
             "最后一条明显是在接你刚才的话、或者在问你，**必须回**，不要 SKIP。"
@@ -360,7 +360,7 @@ def _should_interrupt(group, since):
     new = [
         (a, c or "", ts)
         for a, c, ts, is_bot in rows
-        if ts > since and not is_bot and a not in OTHER_BOT_NAMES
+        if ts > since and not is_bot
     ]
     if not new:
         return False
@@ -474,7 +474,7 @@ def _fresh_rows(group: str) -> list:
     return [r for r in rows if r[2] > since] or rows[-8:]
 
 
-OTHER_BOT_NAMES = {"Rantindom机器人", "神", "都报"}
+SELF_NAMES = {"DSH", "大肥鱼", "小鲸鱼", "鱼"}
 MEME_WORDS = ("大肥鱼", "白饭", "token", "服务器繁忙", "得加钱", "誓死", "终有一天",
               "V我50", "上错模型", "吃白饭", "蹭饭", "小鱼干")
 

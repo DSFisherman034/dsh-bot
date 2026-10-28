@@ -410,3 +410,12 @@
   `send_group` 只有 `ok_img` 才记发送/打「群发图」，失败打 warning。
 - 验证：`/send` image `2309d05d` → `/files` 200、`/messages` 200；364 张图已 chmod 644。
 - 需要重启。
+
+## 2026-10-28 · v0.37 机器人和人类同地位
+
+- `handle_group` 去掉 `is_bot_author` 过滤：其他 bot 的非 @ 消息也触发 ambient；
+  只过滤自己发的消息（`SELF_NAMES`），避免自问自答。
+- `ambient_instruction` / `_should_interrupt` 不再排除其他 bot：机器人提问也能强制回，
+  机器人纠错也能打断正在发的气泡。
+- 人设更新：机器人也是群友，别只因为对方是 bot 就 SKIP；保留「别刷屏/别复读」。
+- 需要重启。
