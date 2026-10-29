@@ -99,7 +99,7 @@ curl -s localhost:3704/stats             # 库里消息数/群数
 
 ```bash
 cd ~/dsh/dsh-bot
-sudo install -o dsfisherman -g dsfisherman -m 644 main.py brain.py memory.py persona.md README.md CHANGELOG.md /opt/dsh-bot/
+sudo install -o dsfisherman -g dsfisherman -m 644 main.py brain.py memory.py quote.py persona.md README.md CHANGELOG.md /opt/dsh-bot/
 sudo install -o dsfisherman -g dsfisherman -m 600 config.ini /opt/dsh-bot/config.ini
 sudo install -o dsfisherman -g dsfisherman -m 600 agent/AGENTS.md /opt/dsh-bot/agent/AGENTS.md
 sudo systemctl restart dsh-bot

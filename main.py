@@ -36,6 +36,7 @@ import material  # noqa: E402
 import media  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
 from memory import Memory  # noqa: E402
+from quote import RE_QUOTE_REF, refs_block, take_marker  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
@@ -72,6 +73,8 @@ BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
 # 消息 id 游标：给 DSH 的增量按 id 算，不用本机时间（平台时间慢 1-2 秒会漏消息）
 LAST_SEEN_ID: dict[str, int] = {}
+# 每轮提示词里给的「#编号」列表：模型回复里的 [[引:#k]] 靠它换回 msg_id
+LAST_REFS: dict[str, list] = {}
 PENDING_SEEN: dict[str, int] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
@@ -318,9 +321,14 @@ async def _ambient_round(group):
         if not text:
             log.info("插话跳过[模型决定不说] group=%s", group[:8])
             return
+        text, ref_quote, ref_k = take_marker(text, LAST_REFS.get(group, []))
+        if not text:
+            log.info("插话跳过[只剩引用标记] group=%s", group[:8])
+            return
+        log_quote_ref(group, ref_k, ref_quote)
 
         await asyncio.sleep(_typing_delay(text))
-        quote = quote_for_ambient(group, quote_since, text)
+        quote = ref_quote or quote_for_ambient(group, quote_since, text)
         await send_group(group, text, msg_id=None, quote_id=quote, since_id=cut_id)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
@@ -434,6 +442,12 @@ async def reply_group(group, task, who, msg_id=None, message=None):
     if not text:
         log.info("模型选择沉默 task=%s", task)
         return
+    text, ref_quote, ref_k = take_marker(text, LAST_REFS.get(group, []))
+    if not text:
+        log.info("只回了引用标记，没有正文 task=%s", task)
+        return
+    log_quote_ref(group, ref_k, ref_quote)
+    quote = ref_quote or quote
     await asyncio.sleep(_typing_delay(text))
     await send_group(group, text, msg_id=msg_id, quote_id=quote, since_id=cut_id)
 
@@ -515,6 +529,7 @@ async def _confirm_continue(group, since_id, remaining, sent_count):
 async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
+    text = RE_QUOTE_REF.sub("", text)
     text = await apply_image_scopes(text)
     if not group_allows_proactive(group):
         # 这类群不允许主动消息：即使模型写了标记，也合并成一条，别拆
@@ -623,6 +638,18 @@ def _quote_mode() -> str:
 
 def _quote_stale() -> float:
     return CONFIG.getfloat("behavior", "quote_stale_seconds", fallback=120)
+
+
+def log_quote_ref(group, k, quote_id):
+    """记一笔模型报的编号，线上才分得清「没写标记」和「写了指向最新」。"""
+    if k is None:
+        return
+    if quote_id:
+        rows = LAST_REFS.get(group, [])
+        who = rows[k - 1][1] if 0 < k <= len(rows) else "?"
+        log.info("引用：模型指定 #%d（%s）group=%s", k, who, group[:8])
+    else:
+        log.info("引用：模型写了 #%d（最新/越界），不引 group=%s", k, group[:8])
 
 
 def quote_for_addressed(group, message) -> str | None:
@@ -919,7 +946,7 @@ def cut_status_block(group: str) -> str:
 
 
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
-                     fresh=None) -> str:
+                     fresh=None, refs_enabled: bool = True) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
     if fresh is None:
         fresh = _fresh_rows(group)
@@ -941,6 +968,12 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
     head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
+
+    # 引用编号：模型知道自己在回谁，比自己猜（按名字/最近一条）准得多。
+    # 暖场/私信没有"在回谁"这回事，refs_enabled=False 就不给编号。
+    refs = MEMORY.recent_external(group, SELF_NAMES, limit=8) if refs_enabled else []
+    LAST_REFS[group] = refs
+    ref_block = refs_block(refs)
     cross_block = other_group_context(group, instruction, fresh)
     cut_block = cut_status_block(group)
     summ = _ctx_state(group, "ctxsum").strip()
@@ -977,10 +1010,15 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
         "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
+    if ref_block:
+        tail += (
+            "\n回复最前面必须写 [[引:#编号]]，标明你在接上面列表里的哪一条；"
+            "写错或漏写就会引错人。"
+        )
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{ref_block}{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
@@ -1146,14 +1184,15 @@ def last_spoke_hint(group: str) -> str:
 
 
 async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
-                  with_images: bool = False) -> str | None:
+                  with_images: bool = False, quote_refs: bool = True) -> str | None:
     """所有"要不要说话、说什么"都问 DSH。返回 None 表示这次不说话。"""
     if BRIDGE is None:
         return None
     key = f"sid:{group}"
     await maybe_compact(group)   # 窗口到 50 条先压成摘要，再取本轮增量
     fresh = _fresh_rows(group)
-    prompt = build_dsh_prompt(group, instruction, who, message, fresh=fresh)
+    prompt = build_dsh_prompt(group, instruction, who, message, fresh=fresh,
+                             refs_enabled=quote_refs)
     images = collect_prompt_images(fresh) if with_images else []
     try:
         text = await BRIDGE.prompt(
@@ -1347,7 +1386,7 @@ async def _maybe_warmup(group: str):
     instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
                    + f"\n\n手上的由头：\n{stuff}")
     cut_id = MEMORY.max_id(group)
-    text = await ask_dsh(group, instruction)
+    text = await ask_dsh(group, instruction, quote_refs=False)
     if not text:
         st["last_ts"] = now - cooldown + 1800
         _save_warm_state(group, st)
@@ -1578,15 +1617,31 @@ async def main():
         else:
             instruction = ("没人 @ 你。能接就接，别太保守；只有完全无关、"
                            "或者说了只会显得多余，才输出 SKIP。")
-        prompt = build_dsh_prompt(
-            "debug:persona", instruction,
-            fresh=[("深海渔民", text, time.time(), False)],
-        )
+        instruction = (body.get("instruction") or "").strip() or instruction
+        # 传 group 就用那个群的最近消息当上下文，能在本地验证「#编号/引用」是否对上；
+        # 不传则只喂 text 一条，跟以前一样。
+        group = (body.get("group") or "").strip()
+        if group:
+            fresh = MEMORY.recent_messages(
+                group, minutes=int(body.get("minutes") or 60), limit=10
+            )
+            if not fresh:
+                return {"ok": False, "error": "no messages in that group"}
+        else:
+            group = "debug:persona"
+            fresh = [("深海渔民", text, time.time(), False)]
+        prompt = build_dsh_prompt(group, instruction, fresh=fresh)
         try:
             reply = await BRIDGE.prompt("debug:persona", prompt)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        return {"ok": True, "reply": reply}
+        clean, quote, qk = take_marker(reply or "", LAST_REFS.get(group, []))
+        out = {"ok": True, "reply": clean, "quote_id": quote, "quote_k": qk,
+               "refs": [(i + 1, a, (c or "")[:20]) for i, (_m, a, c, _t) in
+                        enumerate(LAST_REFS.get(group, []))]}
+        if body.get("show_prompt"):
+            out["prompt"] = prompt
+        return out
 
     @CLIENT.app.app.get("/groups")
     async def groups_api():

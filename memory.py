@@ -161,6 +161,21 @@ class Memory:
         ).fetchall()
         return list(reversed(rows))
 
+    def recent_external(self, group, self_names, limit=8, minutes=30):
+        """最近的外部消息（真人或其他 bot），带 msg_id 和正文，按时间正序。
+
+        给提示词里的「#编号」用：模型回一句话时指哪条，引用的就是哪条。
+        """
+        names = tuple(self_names)
+        marks = ",".join("?" * len(names)) if names else "NULL"
+        rows = self.conn.execute(
+            "SELECT msg_id, author, content, ts FROM messages WHERE group_openid=?"
+            f" AND NOT (is_bot=1 AND author IN ({marks})) AND msg_id IS NOT NULL"
+            " AND ts >= ? ORDER BY ts DESC, id DESC LIMIT ?",
+            (group, *names, time.time() - minutes * 60, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
     def last_external_msg_id(self, group, after_id=0, self_names=()):
         """最近一条外部消息的平台 msg_id（引用用）；没有就 None。"""
         names = tuple(self_names)
