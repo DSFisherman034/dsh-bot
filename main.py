@@ -454,27 +454,62 @@ async def apply_image_scopes(text: str) -> str:
     return IMG_SCOPE_RE.sub("", text or "").strip()
 
 
-def _should_interrupt(group, since_id):
-    """发送中途来了新的、像追问/纠错/叫我的消息，就停掉剩余气泡。
+CONTINUE_STOP_KEYS = ("?", "？", "什么", "怎么", "为什么", "哪", "谁", "吗",
+                     "不是", "错误", "不对", "别发", "停", "等等", "等下",
+                     "@", "改", "坏", "乱")
 
-    用消息 id 游标，不用平台 ts：平台时间比本机慢 1-2 秒，会漏掉刚到的消息。
+
+async def _confirm_continue(group, since_id, remaining, sent_count):
+    """发送中途来了新消息：先暂停，再确认剩余气泡还要不要发。
+
+    确认用本地 Brain，只输出 CONTINUE/STOP；失败时按关键词兜底。
+    返回 (是否继续, 已确认到的最后消息 id)。
     """
     try:
-        rows = MEMORY.messages_after_id(group, since_id, limit=20)
+        rows = MEMORY.messages_after_id(group, since_id, limit=10)
     except Exception:
-        return False
+        return True, None
     new = [
         (a or "", c or "")
         for _id, a, c, _ts, is_bot in rows
         if not is_bot and (a or "") not in SELF_NAMES
     ]
     if not new:
-        return False
+        return True, None
+    last_id = rows[-1][0]
     text = " ".join(c for _a, c in new[-3:])
-    keys = ("?", "？", "什么", "怎么", "为什么", "哪", "谁", "吗",
-            "不是", "错误", "不对", "别发", "停", "等等", "等下",
-            "@", "改", "坏")
-    return any(k in text for k in keys)
+    convo = "\n".join(f"[{a}] {c}" for a, c in new[-5:])
+    remain = "\n".join(f"- {p[:80]}" for p in remaining[:3])
+    system = "你是群聊发言节奏判断器。只输出 CONTINUE 或 STOP，不解释。"
+    user = (
+        f"你正在分条发消息，已经发了 {sent_count} 条。\n"
+        f"剩余未发：\n{remain}\n\n"
+        f"群里刚来了新消息：\n{convo}\n\n"
+        "判断剩余还要不要继续发。规则：\n"
+        "- 新消息在追问你、纠正你、@你、换话题，或明显在等你回应 → STOP（先回新的）\n"
+        "- 新消息只是无关的哈哈/表情/别人之间聊天，剩余内容仍然成立 → CONTINUE\n"
+        "- 不确定 → STOP\n"
+        "只输出 CONTINUE 或 STOP。"
+    )
+    decision = "STOP"
+    try:
+        if BRAIN is None:
+            raise RuntimeError("brain not ready")
+        out = await asyncio.wait_for(
+            BRAIN.complete(system, user, temperature=0.0,
+                           max_tokens=8, enable_thinking=False),
+            timeout=3.0,
+        )
+        up = (out or "").strip().upper()
+        if up.startswith("CONTINUE") or up.startswith("继续"):
+            decision = "CONTINUE"
+    except Exception:
+        log.warning("二次确认失败，按关键词兜底 group=%s", group[:8], exc_info=True)
+        decision = "STOP" if any(k in text for k in CONTINUE_STOP_KEYS) else "CONTINUE"
+    log.info("发送中二次确认：%s（剩余 %d 条，新消息 %r）group=%s",
+             decision, len(remaining), text[:60], group[:8])
+    return decision == "CONTINUE", last_id
+
 
 async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
@@ -491,9 +526,12 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
     sent_image = False
     async with lock:
         for i, part in enumerate(bubbles):
-            if _should_interrupt(group, since_id):
-                log.info("新消息打断，剩余 %d 条不发 group=%s", len(bubbles) - i, group[:8])
+            cont, new_cursor = await _confirm_continue(group, since_id, bubbles[i:], sent_count)
+            if not cont:
+                log.info("二次确认 STOP，剩余 %d 条不发 group=%s", len(bubbles) - i, group[:8])
                 break
+            if new_cursor is not None:
+                since_id = new_cursor
             try:
                 m = IMG_MARKER.search(part)
                 if m:
@@ -628,8 +666,9 @@ def quote_for_ambient(group, since_id) -> str | None:
 
 
 def _typing_delay(text: str) -> float:
-    base = 0.9 + min(len(text), 120) * 0.022
-    return min(4.0, base + random.uniform(0.0, 1.1))
+    # 比旧版多留约 1 秒：先让别人有机会接话，别每次都抢在人类前面开口
+    base = 1.6 + min(len(text), 120) * 0.03
+    return min(5.5, base + random.uniform(0.4, 1.4))
 
 
 def _ts(iso: str) -> float:
