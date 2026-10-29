@@ -217,11 +217,8 @@ async def handle_group(message, addressed: bool):
         is_bot_author = bool(message.author.is_bot)
         content = await render_incoming(message)
         content = await enrich_attachments(message, content)
-        # messages.msg_id 存引用 id（REFIDX_xxx），不是被动回复的 message.id；
-        # 被动回复的 msg_id 在 reply_group 里直接用 message.id。
-        quote_id = getattr(message, "id_for_quote", None) or message.id
         MEMORY.add_message(
-            group, quote_id, message.author.username, message.author.openid,
+            group, message.id, message.author.username, message.author.openid,
             content, is_bot=False, ts=_ts(message.timestamp),
         )
         MEMORY.ensure_group(group)
@@ -623,11 +620,6 @@ def _quote_stale() -> float:
     return CONFIG.getfloat("behavior", "quote_stale_seconds", fallback=120)
 
 
-def _is_quote_id(value) -> bool:
-    """QQ 的 message_reference.message_id 要 REFIDX_xxx，不是 message.id。"""
-    return isinstance(value, str) and value.startswith("REFIDX_")
-
-
 def quote_for_addressed(group, message) -> str | None:
     """被 @ 时的引用路由。
 
@@ -637,21 +629,18 @@ def quote_for_addressed(group, message) -> str | None:
     - 它就紧跟在你上一句后面、或者就是最新一条 → 不引，引了是噪音。
     """
     mode = _quote_mode()
-    if mode == "off" or message is None:
+    if mode == "off" or message is None or not getattr(message, "id", None):
         return None
-    quote_id = getattr(message, "id_for_quote", None)
-    if not _is_quote_id(quote_id):
-        return None  # 没有 REFIDX 就不引，绝不拿 message.id 冒充
     if mode == "always":
-        return quote_id
+        return message.id
     latest = MEMORY.last_external_msg_id(group, 0, SELF_NAMES)
-    if latest and latest != quote_id:
+    if latest and latest != message.id:
         log.info("引用：@ 的消息已被顶上去 group=%s", group[:8])
-        return quote_id
+        return message.id
     age = time.time() - _ts(message.timestamp)
     if age >= _quote_stale():
         log.info("引用：@ 的消息隔了 %d 秒 group=%s", age, group[:8])
-        return quote_id
+        return message.id
     return None
 
 
@@ -660,8 +649,7 @@ def quote_for_ambient(group, since_id, text="") -> str | None:
     mode = _quote_mode()
     if mode == "off":
         return None
-    rows = [r for r in MEMORY.external_messages_after(group, since_id, SELF_NAMES, limit=10)
-            if _is_quote_id(r[0])]
+    rows = MEMORY.external_messages_after(group, since_id, SELF_NAMES, limit=10)
     if not rows:
         return None
     if mode == "always":

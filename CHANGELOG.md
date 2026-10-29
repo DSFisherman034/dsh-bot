@@ -595,14 +595,3 @@
   引该作者最近那条；没有点名才回退到原来的多人/超时规则。
 - 被 @ 的 `quote_for_addressed` 不变（本来就用被 @ 那条）。
 - 需要重启。
-
-## 2026-10-29 · v0.53 引用 id 改用 REFIDX（id_for_quote）
-
-- 文档：`message_reference.message_id` 要 `REFIDX_xxx`，来自消息事件 `message_scene.ext` 的 `msg_idx`
-  （自己发的消息才是 `ext_info.ref_idx`），不是 `message.id`（`ROBOT1.0_...`）。
-  之前 `messages.msg_id` 存的是 `message.id`，截图能引用是兼容/运气，按文档是错的。
-- 改：`handle_group` 存 `message.id_for_quote`（缺失才退回 `message.id`，但引用只认 `REFIDX_` 前缀）；
-  `quote_for_addressed` 用 `id_for_quote`；`quote_for_ambient` 过滤掉非 `REFIDX_` 的旧行；
-  绝不拿 `message.id` 当 `message_reference.message_id`。
-- 旧消息（7 天内已存 `ROBOT1.0_...`）无法反查 `REFIDX`，短期内不引它们；新消息正常。
-- 需要重启。
