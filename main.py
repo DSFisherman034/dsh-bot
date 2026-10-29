@@ -44,6 +44,10 @@ IMG_MARKER = re.compile(r"\[\[img:([^\[\]\n]{1,60})\]\]")
 IMG_SEARCH_RE = re.compile(r"\[\[img-search:([^\[\]\n]{1,80})\]\]")
 IMG_SCOPE_RE = re.compile(r"\[\[img-scope:([^\[\]\n|]{1,60})\|([^\[\]\n]{1,120})\]\]")
 IMG_HASH_RE = re.compile(r"h=([0-9a-f]{8})")
+# 判断"是不是在叫我"用；不含单字"鱼"，避免把"吃鱼"当成叫我
+ADDRESS_NAMES = ("DSH", "大肥鱼", "小鲸鱼")
+# 渲染后的 mention：@名字(openid)
+AT_TARGET_RE = re.compile(r"@([^()\n]{1,32}?)\(([^)\n]{6,})\)")
 
 # 发送报错里出现这些 = 这个群永远发不进去（群号无效/被踢/无权限），关掉主动发言别再烧 token。
 # 禁言、频控是临时的，不要放进这里。
@@ -170,19 +174,40 @@ class Callbacks(QQCallbacks):
 
 
 def is_addressed(message) -> bool:
+    """这条是不是在叫我。
+
+    先信平台 mentions：只要 mentions 里有别人、没有我，就是找别人，
+    哪怕正文里提到了「大肥鱼」（第三人称）。没有 mentions 时才退回文本判断。
+    """
     try:
-        if any(getattr(m, "is_you", False) for m in getattr(message, "mentions", []) or []):
-            return True
-        name = CONFIG.get("bot", "name", fallback="DSH").strip()
-        if name and name in (message.content or ""):
+        author = getattr(message, "author", None)
+        if (author is not None and getattr(author, "is_bot", False)
+                and (getattr(author, "username", "") or "").strip() in SELF_NAMES):
+            return False  # 自己发的，别回自己
+        mentions = getattr(message, "mentions", []) or []
+        if mentions:
+            for m in mentions:
+                if getattr(m, "is_you", False):
+                    return True
+                if (getattr(m, "username", "") or "").strip() in ADDRESS_NAMES:
+                    return True
+            return False
+        content = message.content or ""
+        targets = AT_TARGET_RE.findall(content)
+        if targets:
+            return any(name.strip() in ADDRESS_NAMES for name, _ in targets)
+        if any(name in content for name in ADDRESS_NAMES):
             return True
         quote = getattr(message, "quote", None)
-        if quote and quote.content and name and name in quote.content:
-            return True
+        qcontent = getattr(quote, "content", "") if quote else ""
+        if qcontent:
+            qtargets = AT_TARGET_RE.findall(qcontent)
+            if qtargets:
+                return any(name.strip() in ADDRESS_NAMES for name, _ in qtargets)
+            return any(name in qcontent for name in ADDRESS_NAMES)
     except Exception:
         pass
     return False
-
 
 # ---------------- 处理消息 ----------------
 
@@ -281,22 +306,21 @@ async def _ambient_round(group):
     debounce = CONFIG.getint("behavior", "ambient_debounce", fallback=10)
     try:
         await asyncio.sleep(debounce)
-        since = time.time()
-
         reason = ambient_skip_reason(group)
         if reason:
             log.info("插话不开口[%s] group=%s", reason, group[:8])
             return
 
-        since_id = LAST_SEEN_ID.get(group, 0)
+        quote_since = LAST_SEEN_ID.get(group, 0)
+        cut_id = MEMORY.max_id(group)
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
             log.info("插话跳过[模型决定不说] group=%s", group[:8])
             return
 
         await asyncio.sleep(_typing_delay(text))
-        quote = quote_for_ambient(group, since_id)
-        await send_group(group, text, msg_id=None, since=since, quote_id=quote)
+        quote = quote_for_ambient(group, quote_since)
+        await send_group(group, text, msg_id=None, quote_id=quote, since_id=cut_id)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
     finally:
@@ -307,15 +331,18 @@ async def _ambient_round(group):
             schedule_ambient(group)
 
 
-_AT_ME_WORDS = ("DSH", "大肥鱼", "小鲸鱼")
-
-
 def _addressed_to_others(text: str) -> bool:
-    """这条消息像不像在 @ 别人（而不是你）。"""
+    """这条消息的 @ 目标是不是别人（而不是我）。
+
+    只看渲染出来的 @目标：正文里出现「大肥鱼」但 @ 的是别人，不算在说我。
+    """
     text = text or ""
-    if not text or any(w in text for w in _AT_ME_WORDS):
-        return False
-    return "@" in text
+    targets = AT_TARGET_RE.findall(text)
+    if targets:
+        return all(name.strip() not in ADDRESS_NAMES for name, _ in targets)
+    if "@" in text and not any(w in text for w in ADDRESS_NAMES):
+        return True
+    return False
 
 
 def _looks_like_followup(rows, last_bot_ts) -> bool:
@@ -394,7 +421,7 @@ def ambient_instruction(group: str) -> str:
 
 async def reply_group(group, task, who, msg_id=None, message=None):
     # 被 @ 时才把图本身交给 DSH：它真的能看，插话/暖场就够了文字描述
-    since = time.time()
+    cut_id = MEMORY.max_id(group)
     with_images = CONFIG.getboolean("dsh", "attach_images", fallback=True)
     quote = quote_for_addressed(group, message)
     text = await ask_dsh(group, f"最后一条是 {who} @ 你，回他一句。", who, message,
@@ -407,7 +434,7 @@ async def reply_group(group, task, who, msg_id=None, message=None):
         log.info("模型选择沉默 task=%s", task)
         return
     await asyncio.sleep(_typing_delay(text))
-    await send_group(group, text, msg_id=msg_id, since=since, quote_id=quote)
+    await send_group(group, text, msg_id=msg_id, quote_id=quote, since_id=cut_id)
 
 
 # ---------------- 发送 ----------------
@@ -427,33 +454,36 @@ async def apply_image_scopes(text: str) -> str:
     return IMG_SCOPE_RE.sub("", text or "").strip()
 
 
-def _should_interrupt(group, since):
-    """发送中途来了新的真人追问/纠错，就停掉剩余气泡。"""
+def _should_interrupt(group, since_id):
+    """发送中途来了新的、像追问/纠错/叫我的消息，就停掉剩余气泡。
+
+    用消息 id 游标，不用平台 ts：平台时间比本机慢 1-2 秒，会漏掉刚到的消息。
+    """
     try:
-        rows = MEMORY.recent_messages(group, minutes=2, limit=20)
+        rows = MEMORY.messages_after_id(group, since_id, limit=20)
     except Exception:
         return False
     new = [
-        (a, c or "", ts)
-        for a, c, ts, is_bot in rows
-        if ts > since and not is_bot
+        (a or "", c or "")
+        for _id, a, c, _ts, is_bot in rows
+        if not is_bot and (a or "") not in SELF_NAMES
     ]
     if not new:
         return False
-    text = " ".join(c for _a, c, _ts in new[-3:])
+    text = " ".join(c for _a, c in new[-3:])
     keys = ("?", "？", "什么", "怎么", "为什么", "哪", "谁", "吗",
-            "不是", "错误", "不对", "别发", "停", "等等", "等下", "@")
+            "不是", "错误", "不对", "别发", "停", "等等", "等下",
+            "@", "改", "坏")
     return any(k in text for k in keys)
 
-
-async def send_group(group, text, msg_id=None, since=None, quote_id=None) -> bool:
+async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
     if not text.strip():
         return False
-    if since is None:
-        since = time.time()
+    if since_id is None:
+        since_id = MEMORY.max_id(group)
     limit = CONFIG.getint("behavior", "max_reply_chars", fallback=300)
     bubbles = split_bubbles(text, limit)
     lock = GROUP_SEND_LOCKS.setdefault(group, asyncio.Lock())
@@ -461,7 +491,7 @@ async def send_group(group, text, msg_id=None, since=None, quote_id=None) -> boo
     sent_image = False
     async with lock:
         for i, part in enumerate(bubbles):
-            if _should_interrupt(group, since):
+            if _should_interrupt(group, since_id):
                 log.info("新消息打断，剩余 %d 条不发 group=%s", len(bubbles) - i, group[:8])
                 break
             try:
@@ -1176,6 +1206,7 @@ async def _maybe_warmup(group: str):
 
     instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
                    + f"\n\n手上的由头：\n{stuff}")
+    cut_id = MEMORY.max_id(group)
     text = await ask_dsh(group, instruction)
     if not text:
         st["last_ts"] = now - cooldown + 1800
@@ -1184,7 +1215,7 @@ async def _maybe_warmup(group: str):
         return
 
     await asyncio.sleep(_typing_delay(text))
-    ok = await send_group(group, text, msg_id=None)
+    ok = await send_group(group, text, msg_id=None, since_id=cut_id)
     if ok:
         st["last_ts"] = now
         st["count"] = int(st.get("count", 0) or 0) + 1
