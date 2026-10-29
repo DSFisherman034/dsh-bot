@@ -672,3 +672,28 @@
   把「截断」字样喂给摘要器会污染摘要/记忆。
 - 起因：01:22 有人贴了 1048 字故事，bot 只看到前 200 字，回「故事断在'它想找一样能'」，
   实际群里是完整的。
+
+## 2026-10-30 · v0.60 人物记忆 + 状态心情 + 事件触发 + 自我复盘
+
+四项一起上，各自有开关/独立表，坏了单独摘。
+
+- 人物记忆：新增 `people` 表（openid 主键，记 name / first_ts / last_ts / msg_count / note）。
+  `touch_person()` 在每条真人消息里调用，纯 SQL 零成本；`people_loop` 每 2h 给
+  「说过 ≥6 条、画像超 24h」的人用本地模型提炼一句印象（每轮最多 2 人）。
+  `build_dsh_prompt` 只注入「刚 @ 我的人」和「最后说话的人」的画像（最多 2 条），不当花名册。
+- 状态/心情：`state: self:mood` 存 `fed_ts / fed_count / grumpy_until`。饿由
+  「距上次被喂多少小时」推（每小时 +4），困由时段推（02–07 最困）。`FED_WORDS`
+  （投喂/鱼食/小鱼干…）重置饥饿并消气，`GRUMPY_WORDS`（笨/傻/滚蛋…）记仇 5 分钟。
+  `mood_line()` 注入时带强约束：只在自然相关时提、不要每句提、不要当万能答案。
+  `mood_enabled=false` 整体关掉（v0.48「小日常变万能答案」的教训写进约束里）。
+- 事件触发：新增 `events.py`，只报本机真实能查到的事——磁盘 ≥88%、负载 > CPU×2、
+  内存 ≥92%、周五晚/周一上午/月底。同一事件（key 带日期/小时）只说一次；
+  有事件时冷场门槛从 `warmup_idle`(1800) 降到 `warmup_event_idle`(600)，
+  仍受 cooldown/daily_max/夜间/静默约束。没事件就退回 `material` 四源，不是替代。
+- 自我复盘：新增 `reviews` 表 + `review_loop` 每 6h 一次，**纯 SQL 不烧 LLM**。
+  统计过去 24h 自己发了几条、15 分钟内被接几条、接话率，并按问句/短句/普通/长句分类；
+  每条保留原文和对方的反应，给调风格当数据。
+- 两个只读接口（都要 `x-token`，因为 nginx `location /` 全转发）：`GET /review?group=&days=`、
+  `GET /people?limit=`。
+- 表情表态：查官方文档确认**仅频道（guild/channel）支持**，群聊没有 reactions 接口，不做。
+- 单测：`reference/new_features_check.py`，people/mood/events/review 全覆盖，用 `:memory:`。

@@ -1941,9 +1941,16 @@ async def main():
         return MEMORY.stats()
 
     @CLIENT.app.app.get("/review")
-    async def review_api(group: str = "", days: int = 7):
-        """复盘报告：不发群，给调风格/看数据用。group 空则返回所有活跃群。"""
-        days = max(1, min(int(days or 7), 30))
+    async def review_api(request: Request):
+        """复盘报告：不发群，给调风格/看数据用。带 group 就只看那个群。"""
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        group = (request.query_params.get("group") or "").strip()
+        try:
+            days = max(1, min(int(request.query_params.get("days") or 7), 30))
+        except ValueError:
+            days = 7
         targets = [group] if group else [
             g for g in MEMORY.known_groups() if not g.startswith("dc:")
         ]
@@ -1954,9 +1961,15 @@ async def main():
         return {"ok": True, "reviews": out}
 
     @CLIENT.app.app.get("/people")
-    async def people_api(limit: int = 30):
+    async def people_api(request: Request):
         """bot 记了谁、印象是什么；方便核对和纠错。"""
-        limit = max(1, min(int(limit or 30), 100))
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        try:
+            limit = max(1, min(int(request.query_params.get("limit") or 30), 100))
+        except ValueError:
+            limit = 30
         rows = MEMORY.people_overview(limit)
         return {"ok": True, "people": [
             {"name": name, "note": note,
