@@ -32,6 +32,7 @@ from qqbot.botsns.QQClient import exceptions as qqexc  # noqa: E402
 
 from brain import Brain  # noqa: E402
 from render import render_incoming  # noqa: E402
+import events  # noqa: E402
 import material  # noqa: E402
 import media  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
@@ -80,6 +81,7 @@ LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
 LAST_CUT: dict[str, tuple[int, int]] = {}
 GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
+START_TS = time.time()   # 进程启动时刻：事件触发用「刚启动」判断，不用来做元话题
 
 # 上下文滚动压缩：本群会话窗口攒到 50 条（含机器人自己的发言）就把最早 30 条
 # 压成摘要，只留最近 20 条原文；压缩后清掉 DSH 会话，下一轮用「摘要 + 20 条」重开。
@@ -226,6 +228,11 @@ async def handle_group(message, addressed: bool):
             content, is_bot=False, ts=_ts(message.timestamp),
         )
         MEMORY.ensure_group(group)
+        if not is_bot_author:
+            MEMORY.touch_person(
+                message.author.openid, message.author.username, _ts(message.timestamp)
+            )
+            bump_mood(content)
 
         if addressed:
             await reply_group(group, "addressed", message.author.username, msg_id=message.id, message=message)
@@ -953,6 +960,111 @@ def clip_for_prompt(text: str, limit: int) -> str:
     return f"{text[:limit]}…（内容过长已截断，剩 {len(text) - limit} 字）"
 
 
+# ---------------- 人物记忆 / 状态 ----------------
+
+MOOD_KEY = "self:mood"
+FED_WORDS = ("投喂", "鱼食", "小鱼干", "喂鱼", "喂你")
+GRUMPY_WORDS = ("笨", "傻", "滚蛋", "滚开", "滚吧", "闭嘴", "烦死", "没用", "废物")
+
+
+def people_block(group: str, who: str = "", fresh=None) -> str:
+    """把「刚 @ 我的人」和「最后说话的人」的小档案注入提示词。
+
+    只给 1-2 个：全铺开就成了花名册。没画像的人不占位。
+    """
+    if MEMORY is None:
+        return ""
+    names: list[str] = []
+    if who:
+        names.append(who)
+    if fresh:
+        for author, _c, _ts, is_bot in reversed(fresh):
+            if not is_bot and author and author not in names:
+                names.append(author)
+                break
+    lines = []
+    for name in names[:2]:
+        row = MEMORY.person_by_name(name)
+        if not row:
+            continue
+        _openid, _name, note, _note_ts, last_ts, _msg_count = row
+        if not (note or "").strip():
+            continue
+        freshness = "（最近很活跃）" if time.time() - (last_ts or 0) < 86400 else ""
+        lines.append(f"- {name}：{note.strip()}{freshness}")
+    if not lines:
+        return ""
+    return (
+        "你认识的群友（之前的印象，参考就好；别复述、别表现得像在查档案）：\n"
+        + "\n".join(lines) + "\n\n"
+    )
+
+
+def _mood_state() -> dict:
+    raw = MEMORY.get_state(MOOD_KEY) if MEMORY is not None else None
+    try:
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_mood(st: dict):
+    try:
+        MEMORY.set_state(MOOD_KEY, json.dumps(st, ensure_ascii=False))
+    except Exception:
+        log.exception("保存心情失败")
+
+
+def bump_mood(text: str):
+    """喂食/被怼触发心情。只认很明确的词，别乱触发（"吃了吗"不算法）。"""
+    if MEMORY is None:
+        return
+    text = text or ""
+    st = _mood_state()
+    now = time.time()
+    if any(w in text for w in FED_WORDS):
+        st["fed_ts"] = now
+        st["fed_count"] = int(st.get("fed_count", 0) or 0) + 1
+        st["grumpy_until"] = 0
+        _save_mood(st)
+    elif any(w in text for w in GRUMPY_WORDS):
+        st["grumpy_until"] = now + 300
+        _save_mood(st)
+
+
+def mood_line() -> str:
+    """当前状态：饿/困由时间推，记仇/被喂由事件存。克制注入。"""
+    if MEMORY is None:
+        return ""
+    if not CONFIG.getboolean("behavior", "mood_enabled", fallback=True):
+        return ""
+    st = _mood_state()
+    now = time.time()
+    fed_ts = float(st.get("fed_ts") or 0) or (now - 5 * 3600)
+    hunger = min(100.0, max(0.0, (now - fed_ts) / 3600) * 4.0)
+    hour = datetime.now().hour
+    energy = 30 if 2 <= hour < 7 else (55 if 7 <= hour < 9 else 75)
+    grumpy = float(st.get("grumpy_until") or 0) > now
+
+    bits = []
+    if grumpy:
+        bits.append("有点记仇，还没消气")
+    if hunger >= 70:
+        bits.append("很饿")
+    elif hunger >= 40:
+        bits.append("有点饿")
+    if energy <= 35:
+        bits.append("很困")
+    if not bits:
+        return ""
+    return (
+        "你此刻的状态（只是你自己的感觉，不是要汇报的事）：" + "、".join(bits) + "。"
+        "只有在自然相关时（有人问你在干嘛、说到吃饭/睡觉、或者正好接得上）才可以带一句；"
+        "不要每句都提，不要主动宣布「我饿了」，更不要把它当万能答案。\n\n"
+    )
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None, refs_enabled: bool = True) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -999,6 +1111,8 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
             "群内记忆（之前发生的事，参考就好，不要主动复述）：\n"
             + "\n".join(mem_lines) + "\n\n"
         )
+    people_blk = people_block(group, who, fresh)
+    mood_blk = mood_line()
     if group_allows_proactive(group):
         split_line = (
             "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
@@ -1026,7 +1140,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{head}\n\n{ref_block}{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{people_blk}{mood_blk}{head}\n\n{ref_block}{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
@@ -1248,6 +1362,14 @@ HEARTBEAT_INSTRUCTION = (
     "由头跟群里最近聊的对不上，宁可输出 SKIP。"
 )
 
+EVENT_INSTRUCTION = (
+    "群里正好安静。你刚碰到一件事，想随口提一句："
+    "找一个像「刚注意到」的说法，不要像播报，不要解释你怎么知道的，"
+    "不要说「系统监测到」「检测到」「本机」这种词。"
+    "只发一句；对方没接就让它过去，不要追问。"
+    "由头跟群里最近的聊天完全接不上，宁可输出 SKIP。"
+)
+
 
 SUMMARY_INTERVAL = 1800
 SUMMARY_MIN_MESSAGES = 12
@@ -1307,6 +1429,139 @@ async def memory_loop():
         await asyncio.sleep(SUMMARY_INTERVAL)
 
 
+# ---------------- 人物画像（离线，低频） ----------------
+
+PEOPLE_INTERVAL = 7200
+PEOPLE_MIN_MESSAGES = 6
+PEOPLE_STALE_HOURS = 24
+PEOPLE_MAX_PER_ROUND = 2
+
+
+async def summarize_person(openid: str, name: str) -> str | None:
+    """给一个人提炼一句印象；失败返回 None，不推进 note_ts，下轮再试。"""
+    if BRAIN is None:
+        return None
+    rows = MEMORY.person_messages(openid, limit=25, days=7)
+    if len(rows) < 3:
+        return None
+    lines = []
+    for _g, _a, content, ts in rows:
+        clock = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+        lines.append(f"[{clock}] {(content or '').strip()[:120]}")
+    system = (
+        "你在给群友记小档案。根据这个人最近在群里说的话，写一句印象："
+        "他是什么样的人、说话什么风格、最近在关心什么。只写一句，不超过 40 字；"
+        "只写你确实从话里看出来的，不确定就只输出 NONE。"
+        "不要评价外貌，不要编造，不要 Markdown。"
+    )
+    try:
+        text = await BRAIN.complete(
+            system, f"群友：{name}\n最近的话：\n" + "\n".join(lines),
+            temperature=0.3, max_tokens=120, enable_thinking=False,
+        )
+    except Exception:
+        log.exception("人物画像调用失败 %s", name)
+        return None
+    note = (text or "").strip().splitlines()[0].strip() if text else ""
+    if not note or note.upper() == "NONE":
+        return None
+    return note[:120]
+
+
+async def people_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            due = MEMORY.people_needing_note(
+                min_messages=PEOPLE_MIN_MESSAGES,
+                stale_hours=PEOPLE_STALE_HOURS,
+                limit=PEOPLE_MAX_PER_ROUND,
+            )
+            for openid, name, _count, _note_ts in due:
+                note = await summarize_person(openid, name or "某人")
+                if note:
+                    MEMORY.set_person_note(openid, note)
+                    log.info("人物画像 %s: %s", name, note[:50])
+        except Exception:
+            log.exception("人物画像循环出错")
+        await asyncio.sleep(PEOPLE_INTERVAL)
+
+
+# ---------------- 自我复盘（纯规则，不烧 LLM） ----------------
+
+REVIEW_INTERVAL = 6 * 3600
+REVIEW_WINDOW_HOURS = 24
+REVIEW_REPLY_WINDOW = 15 * 60
+
+
+def _reply_kind(text: str) -> str:
+    t = (text or "").strip()
+    if any(k in t for k in ("?", "？", "吗", "怎么", "为什么", "谁", "哪")):
+        return "question"
+    if len(t) <= 6:
+        return "short"
+    if len(t) >= 40:
+        return "long"
+    return "normal"
+
+
+async def build_review(group: str) -> dict | None:
+    """过去 24h：自己说了什么、哪条被接、哪条冷场。给调风格当数据。"""
+    since = time.time() - REVIEW_WINDOW_HOURS * 3600
+    rows = MEMORY.bot_messages_since(group, since)
+    if not rows:
+        return None
+    items = []
+    replied = 0
+    for mid, content, ts in rows:
+        nxt = MEMORY.next_message_between(group, mid, ts + REVIEW_REPLY_WINDOW)
+        got = bool(nxt) and not (nxt[2] and (nxt[3] or "") in SELF_NAMES)
+        if got:
+            replied += 1
+        items.append({
+            "t": datetime.fromtimestamp(ts).strftime("%H:%M"),
+            "kind": _reply_kind(content),
+            "text": (content or "")[:80],
+            "replied": got,
+            "reaction": (nxt[0][:60] if got and nxt[0] else ""),
+        })
+    total = len(items)
+    kinds: dict[str, dict] = {}
+    for it in items:
+        d = kinds.setdefault(it["kind"], {"n": 0, "hit": 0})
+        d["n"] += 1
+        d["hit"] += 1 if it["replied"] else 0
+    data = {
+        "window_h": REVIEW_WINDOW_HOURS,
+        "sent": total,
+        "replied": replied,
+        "replied_pct": round(replied * 100 / total) if total else 0,
+        "cold": total - replied,
+        "items": items[-40:],
+        "by_kind": {
+            k: {"n": d["n"], "hit": d["hit"],
+                "pct": round(d["hit"] * 100 / d["n"]) if d["n"] else 0}
+            for k, d in kinds.items()
+        },
+    }
+    MEMORY.add_review(group, datetime.now().strftime("%Y-%m-%d"), data)
+    return data
+
+
+async def review_loop():
+    await asyncio.sleep(90)
+    while True:
+        try:
+            for group in MEMORY.known_groups():
+                data = await build_review(group)
+                if data:
+                    log.info("复盘 %s: 发 %d 条，被接 %d 条（%d%%）",
+                             group[:8], data["sent"], data["replied"], data["replied_pct"])
+        except Exception:
+            log.exception("复盘循环出错")
+        await asyncio.sleep(REVIEW_INTERVAL)
+
+
 def _warm_state(group: str) -> dict:
     raw = MEMORY.get_state(f"warm:{group}")
     if not raw:
@@ -1346,7 +1601,13 @@ async def _maybe_warmup(group: str):
     silent = CONFIG.getint("behavior", "warmup_silent", fallback=86400)
 
     last_act = MEMORY.last_activity(group)
-    if now - last_act < idle:
+    # 有事件（磁盘满/负载高/时间节点）时不必等到冷场 30 分钟，安静 10 分钟就能说
+    event = events.collect(MEMORY)
+    need_idle = (
+        CONFIG.getint("behavior", "warmup_event_idle", fallback=600)
+        if event else idle
+    )
+    if now - last_act < need_idle:
         return                       # 还有人在说话，不用暖
     if now - last_act > alive:
         return                       # 太久没人，说了也没人看
@@ -1384,15 +1645,20 @@ async def _maybe_warmup(group: str):
         _save_warm_state(group, st)
         return
 
-    stuff = await material.collect(group, MEMORY)
-    if not stuff:
-        log.info("暖场：没有合格由头，跳过 group=%s", group[:8])
-        st["last_ts"] = now - cooldown + 1800
-        _save_warm_state(group, st)
-        return
-
-    instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
-                   + f"\n\n手上的由头：\n{stuff}")
+    if event:
+        events.mark(MEMORY, event)
+        log.info("事件触发[%s]：%s group=%s", event["kind"], event["text"], group[:8])
+        instruction = (EVENT_INSTRUCTION + last_spoke_hint(group)
+                       + f"\n\n你刚注意到的事：\n{event['text']}")
+    else:
+        stuff = await material.collect(group, MEMORY)
+        if not stuff:
+            log.info("暖场：没有合格由头，跳过 group=%s", group[:8])
+            st["last_ts"] = now - cooldown + 1800
+            _save_warm_state(group, st)
+            return
+        instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
+                       + f"\n\n手上的由头：\n{stuff}")
     cut_id = MEMORY.max_id(group)
     text = await ask_dsh(group, instruction, quote_refs=False)
     if not text:
@@ -1674,10 +1940,37 @@ async def main():
     async def stats():
         return MEMORY.stats()
 
+    @CLIENT.app.app.get("/review")
+    async def review_api(group: str = "", days: int = 7):
+        """复盘报告：不发群，给调风格/看数据用。group 空则返回所有活跃群。"""
+        days = max(1, min(int(days or 7), 30))
+        targets = [group] if group else [
+            g for g in MEMORY.known_groups() if not g.startswith("dc:")
+        ]
+        out = {}
+        for g in targets[:5]:
+            rows = MEMORY.latest_reviews(g, limit=days)
+            out[g[:8]] = [{"day": day, **json.loads(raw)} for day, _ts, raw in rows]
+        return {"ok": True, "reviews": out}
+
+    @CLIENT.app.app.get("/people")
+    async def people_api(limit: int = 30):
+        """bot 记了谁、印象是什么；方便核对和纠错。"""
+        limit = max(1, min(int(limit or 30), 100))
+        rows = MEMORY.people_overview(limit)
+        return {"ok": True, "people": [
+            {"name": name, "note": note,
+             "last": datetime.fromtimestamp(ts or 0).strftime("%m-%d %H:%M"),
+             "count": count}
+            for name, note, ts, count in rows
+        ]}
+
     log.info("DSH Bot 启动 appid=%s %s:%s model=%s", appid, host, port, BRAIN.model)
     asyncio.create_task(start_bridge())
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(memory_loop())
+    asyncio.create_task(people_loop())
+    asyncio.create_task(review_loop())
     asyncio.create_task(housekeeping_loop())
     await CLIENT.run()
 

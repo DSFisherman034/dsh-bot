@@ -5,6 +5,7 @@
 - 消息只留 7 天，避免无限增长；上下文窗口由查询时的 minutes/limit 控制。
 """
 
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -47,6 +48,24 @@ CREATE TABLE IF NOT EXISTS memories (
     text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_memories_group_ts ON memories(group_openid, ts);
+CREATE TABLE IF NOT EXISTS people (
+    openid TEXT PRIMARY KEY,
+    name TEXT,
+    note TEXT DEFAULT '',
+    note_ts REAL DEFAULT 0,
+    first_ts REAL,
+    last_ts REAL,
+    msg_count INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_people_last ON people(last_ts);
+CREATE TABLE IF NOT EXISTS reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_openid TEXT NOT NULL,
+    day TEXT NOT NULL,
+    ts REAL NOT NULL,
+    data TEXT NOT NULL,
+    UNIQUE(group_openid, day)
+);
 """
 
 
@@ -223,6 +242,120 @@ class Memory:
             (group, limit),
         ).fetchall()
         return list(reversed(rows))
+
+    # ---------- 人物记忆 ----------
+    # 只记"这个人是谁、说过什么"，不记群。openid 是 per-app 稳定的，
+    # 同一个群友跨群是同一个 openid（2026-10-30 起）。
+
+    def touch_person(self, openid, name, ts=None):
+        """每收到一条真人消息更新一次：见过、叫什么、最近活跃。"""
+        if not openid:
+            return
+        ts = ts or time.time()
+        row = self.conn.execute(
+            "SELECT first_ts FROM people WHERE openid=?", (openid,)
+        ).fetchone()
+        if row:
+            self.conn.execute(
+                "UPDATE people SET name=?, last_ts=?, msg_count=msg_count+1"
+                " WHERE openid=?",
+                ((name or "")[:40], ts, openid),
+            )
+            if row[0] is None:
+                self.conn.execute(
+                    "UPDATE people SET first_ts=? WHERE openid=?", (ts, openid)
+                )
+        else:
+            self.conn.execute(
+                "INSERT INTO people(openid,name,first_ts,last_ts,msg_count)"
+                " VALUES (?,?,?,?,1)",
+                (openid, (name or "")[:40], ts, ts),
+            )
+        self.conn.commit()
+
+    def get_person(self, openid):
+        return self.conn.execute(
+            "SELECT openid,name,note,note_ts,first_ts,last_ts,msg_count"
+            " FROM people WHERE openid=?",
+            (openid,),
+        ).fetchone()
+
+    def person_by_name(self, name):
+        """按名字找最近活跃的那个；群里重名极少，够用。"""
+        return self.conn.execute(
+            "SELECT openid,name,note,note_ts,last_ts,msg_count FROM people"
+            " WHERE name=? ORDER BY last_ts DESC LIMIT 1",
+            (name or "",),
+        ).fetchone()
+
+    def people_needing_note(self, min_messages=5, stale_hours=24, limit=4):
+        """说过话但画像过期的人，按最近活跃排；离线画像任务用。"""
+        cutoff = time.time() - stale_hours * 3600
+        return self.conn.execute(
+            "SELECT openid,name,msg_count,note_ts FROM people"
+            " WHERE msg_count>=? AND note_ts<? AND last_ts>?"
+            " ORDER BY last_ts DESC LIMIT ?",
+            (min_messages, cutoff, time.time() - 3 * 86400, limit),
+        ).fetchall()
+
+    def set_person_note(self, openid, note):
+        self.conn.execute(
+            "UPDATE people SET note=?, note_ts=? WHERE openid=?",
+            ((note or "")[:200], time.time(), openid),
+        )
+        self.conn.commit()
+
+    def people_overview(self, limit=30):
+        """[(name, note, last_ts, msg_count), ...]，最近活跃的在前；给 /people 看。"""
+        return self.conn.execute(
+            "SELECT name, note, last_ts, msg_count FROM people"
+            " ORDER BY last_ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+    def person_messages(self, openid, limit=30, days=7):
+        """某人最近的发言：[(group, author, content, ts), ...]，按时间正序。"""
+        rows = self.conn.execute(
+            "SELECT group_openid, author, content, ts FROM messages"
+            " WHERE author_openid=? AND is_bot=0 AND ts>?"
+            " ORDER BY ts DESC LIMIT ?",
+            (openid, time.time() - days * 86400, limit),
+        ).fetchall()
+        return list(reversed(rows))
+
+    # ---------- 自我复盘 ----------
+
+    def add_review(self, group, day, data):
+        self.conn.execute(
+            "INSERT INTO reviews(group_openid,day,ts,data) VALUES (?,?,?,?)"
+            " ON CONFLICT(group_openid,day) DO UPDATE SET ts=excluded.ts, data=excluded.data",
+            (group, day, time.time(), json.dumps(data, ensure_ascii=False)),
+        )
+        self.conn.commit()
+
+    def latest_reviews(self, group, limit=7):
+        """[(day, ts, data_json), ...]，最近的在前。"""
+        return self.conn.execute(
+            "SELECT day, ts, data FROM reviews WHERE group_openid=?"
+            " ORDER BY ts DESC LIMIT ?",
+            (group, limit),
+        ).fetchall()
+
+    def bot_messages_since(self, group, since, limit=200):
+        """自己发过的话：[(id, content, ts), ...]，复盘用。"""
+        return self.conn.execute(
+            "SELECT id, content, ts FROM messages WHERE group_openid=? AND is_bot=1"
+            " AND ts>=? ORDER BY ts LIMIT ?",
+            (group, since, limit),
+        ).fetchall()
+
+    def next_message_between(self, group, after_id, before_ts):
+        """某条之后、某时刻之前的第一条消息：(content, ts, is_bot, author) 或 None。"""
+        return self.conn.execute(
+            "SELECT content, ts, is_bot, author FROM messages"
+            " WHERE group_openid=? AND id>? AND ts<=? ORDER BY id LIMIT 1",
+            (group, after_id, before_ts),
+        ).fetchone()
 
     # ---------- 群状态 ----------
 
