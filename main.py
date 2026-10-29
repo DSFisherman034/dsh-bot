@@ -319,7 +319,7 @@ async def _ambient_round(group):
             return
 
         await asyncio.sleep(_typing_delay(text))
-        quote = quote_for_ambient(group, quote_since)
+        quote = quote_for_ambient(group, quote_since, text)
         await send_group(group, text, msg_id=None, quote_id=quote, since_id=cut_id)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
@@ -644,7 +644,7 @@ def quote_for_addressed(group, message) -> str | None:
     return None
 
 
-def quote_for_ambient(group, since_id) -> str | None:
+def quote_for_ambient(group, since_id, text="") -> str | None:
     """插话时的引用路由：只在"接的不是最新那条、或者群里有好几个人在说"时引。"""
     mode = _quote_mode()
     if mode == "off":
@@ -654,6 +654,12 @@ def quote_for_ambient(group, since_id) -> str | None:
         return None
     if mode == "always":
         return rows[-1][0]
+    # 回复正文点到谁，就引谁那条：避免"回都报"却引了最新的雪天图片
+    if text:
+        for msg_id, author, _ts in reversed(rows):
+            if author and author in text:
+                log.info("引用：回复点到 %s group=%s", author, group[:8])
+                return msg_id
     # 多人插话：最近两条来自不同的人 → 标明接谁的
     if len(rows) >= 2 and rows[-1][1] != rows[-2][1]:
         log.info("引用：多人插话，接 %s group=%s", rows[-1][1], group[:8])
