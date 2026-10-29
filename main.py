@@ -273,7 +273,7 @@ async def handle_dc(message):
                     for author, content, ts, is_bot in gr:
                         clock = datetime.fromtimestamp(ts).strftime("%H:%M")
                         name = "你" if is_bot else (author or "某人")
-                        gr_lines.append(f"[{clock}] {name}: {(content or '').strip()[:160]}")
+                        gr_lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 160)}")
                     parts.append("群里最近的消息（群里的人都知道）：\n" + "\n".join(gr_lines))
                 if parts:
                     extra = (
@@ -921,7 +921,7 @@ def other_group_context(group: str, instruction: str, fresh) -> str:
         for author, content, ts, is_bot in rows[-4:]:
             name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else (author or "某人")
             clock = datetime.fromtimestamp(ts).strftime("%H:%M")
-            lines.append(f"[{clock}] {name}: {(content or '').strip()[:120]}")
+            lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 120)}")
         parts.append(f"[群{g[:8]}]\n" + "\n".join(lines))
     if not parts:
         return ""
@@ -945,6 +945,14 @@ def cut_status_block(group: str) -> str:
             f"剩余 {total - sent} 条没发；不要把没发的部分当成已经说过。\n\n")
 
 
+def clip_for_prompt(text: str, limit: int) -> str:
+    """把消息截到 limit 字；被截了就注明还剩多少，别让模型以为话说完了。"""
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…（内容过长已截断，剩 {len(text) - limit} 字）"
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None, refs_enabled: bool = True) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -965,7 +973,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     for author, content, ts, is_bot in fresh:
         clock = datetime.fromtimestamp(ts).strftime("%H:%M")
         name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else author
-        lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
+        lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 200)}")
 
     head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
 
