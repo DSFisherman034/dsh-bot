@@ -615,3 +615,12 @@
   下一轮模型会以为草稿（如「白饭」）已经说过。新增 `LAST_CUT`，下一轮 prompt 明确写
   「上一条计划 N 条，实际只发 S 条/一条没发」，不让模型把未发内容当成已说。
 - 需要重启。
+
+## 2026-10-29 · v0.56 逐群关闭分条
+
+- 新增 `group_allows_proactive(group)`：`proactive_ok=0` 或 botsns `get_group_send_with_mention=1`
+  （仅 @ 群）时，视为不能安全发多气泡/主动消息。
+- 这类群的 prompt 不再注入 `<🦄发送>`：`bubble_hint` 改成「只输出一条，不要分条」，
+  tail 的说明也按群切换；`send_group` 兜底把模型残留的 `<🦄发送>` 合并成一条。
+- v0.55 的「所有气泡带同一个 msg_id」保留；等 botsns 侧修好、群允许主动消息再放开分条。
+- 需要重启。

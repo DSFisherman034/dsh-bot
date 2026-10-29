@@ -516,6 +516,9 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
+    if not group_allows_proactive(group):
+        # 这类群不允许主动消息：即使模型写了标记，也合并成一条，别拆
+        text = text.replace("<🦄发送>", " ").replace("🦄发送", " ")
     if not text.strip():
         return False
     if since_id is None:
@@ -800,8 +803,29 @@ def meme_budget_hint(group: str) -> str:
     return "这一轮如果语境合适，可以自然带一个梗；不合适就别硬塞。"
 
 
+def group_allows_proactive(group: str) -> bool:
+    """这个群能不能安全地发多气泡/主动消息。
+
+    仅 @ 群（botsns send_with_mention=1）或已经因 400 关掉主动发言的群，
+    先不注入 <🦄发送>，也不拆条；等 botsns 侧修好再放开。
+    """
+    try:
+        if MEMORY is not None and not MEMORY.group_flag(group, "proactive_ok"):
+            return False
+    except Exception:
+        pass
+    try:
+        if CLIENT is not None and CLIENT.public.get_group_send_with_mention(group):
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def bubble_hint(group: str) -> str:
     """防止永远只发一条：最近连续单条就推一把，最近拆太多就收一收。"""
+    if not group_allows_proactive(group):
+        return "本群只能被动回复：只输出一条，不要写 <🦄发送>，也不要分条。"
     hist = LAST_BUBBLES.get(group, [])[-4:]
     if len(hist) >= 4 and all(n <= 1 for n in hist):
         return "你最近四条都是一条，这轮如果能自然分成「反应 + 补充」，就用 <🦄发送> 分两条；别硬拆。"
@@ -934,10 +958,19 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
             "群内记忆（之前发生的事，参考就好，不要主动复述）：\n"
             + "\n".join(mem_lines) + "\n\n"
         )
+    if group_allows_proactive(group):
+        split_line = (
+            "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
+            "决定不说话就只输出 SKIP。\n"
+        )
+    else:
+        split_line = (
+            "只输出要发到群里的话本身；本群只能被动回复，只发一条，"
+            "不要写 <🦄发送>，不要分条；决定不说话就只输出 SKIP。\n"
+        )
     tail = (
-        "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
-        "决定不说话就只输出 SKIP。\n"
-        "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
+        split_line
+        + "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
         "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。\n"
         "想按情绪/场景搜图，就写 [[img-search:描述或情绪]]（例如 [[img-search:摸鱼]]）；"
         "系统会搜索图库并发出最像的一张。这不是外部工具，不需要审批，也不要说“我没有搜索工具”。\n"
