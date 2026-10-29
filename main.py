@@ -75,6 +75,7 @@ LAST_SEEN_ID: dict[str, int] = {}
 PENDING_SEEN: dict[str, int] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
+LAST_CUT: dict[str, tuple[int, int]] = {}
 GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
 
 # 上下文滚动压缩：本群会话窗口攒到 50 条（含机器人自己的发言）就把最早 30 条
@@ -528,6 +529,7 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
         for i, part in enumerate(bubbles):
             cont, new_cursor = await _confirm_continue(group, since_id, bubbles[i:], sent_count)
             if not cont:
+                LAST_CUT[group] = (sent_count, len(bubbles))
                 log.info("二次确认 STOP，剩余 %d 条不发 group=%s", len(bubbles) - i, group[:8])
                 break
             if new_cursor is not None:
@@ -561,20 +563,20 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
                     if use_md:
                         # QQ 的 @ 标签只在 markdown 消息里渲染
                         await CLIENT.group.send_markdown(
-                            group, part, msg_id=msg_id if i == 0 else None,
+                            group, part, msg_id=msg_id,
                             quote_message_id=quote)
                     else:
                         await CLIENT.group.send_message(
-                            group, part, msg_id=msg_id if i == 0 else None,
+                            group, part, msg_id=msg_id,
                             quote_message_id=quote)
                 except Exception:
                     if not quote:
                         raise
                     log.warning("引用发送失败，退回不带引用 group=%s", group[:8])
                     if use_md:
-                        await CLIENT.group.send_markdown(group, part, msg_id=msg_id if i == 0 else None)
+                        await CLIENT.group.send_markdown(group, part, msg_id=msg_id)
                     else:
-                        await CLIENT.group.send_message(group, part, msg_id=msg_id if i == 0 else None)
+                        await CLIENT.group.send_message(group, part, msg_id=msg_id)
                 _record_own(group, part)
                 MEMORY.mark_bot_spoke(group)
                 sent_count += 1
@@ -879,6 +881,19 @@ def other_group_context(group: str, instruction: str, fresh) -> str:
     )
 
 
+def cut_status_block(group: str) -> str:
+    """上一轮被二次确认截断时，明确告诉模型哪些没发出，别把草稿当成已说。"""
+    cut = LAST_CUT.pop(group, None)
+    if not cut:
+        return ""
+    sent, total = cut
+    if sent <= 0:
+        return (f"发送状态：你上一条回复计划了 {total} 条，但被新消息打断，一条都没发出；"
+                "不要把那条内容当成已经说过，也不要在下一条里引用它。\n\n")
+    return (f"发送状态：你上一条回复计划了 {total} 条，实际只发出前 {sent} 条，"
+            f"剩余 {total - sent} 条没发；不要把没发的部分当成已经说过。\n\n")
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -903,6 +918,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
 
     head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
     cross_block = other_group_context(group, instruction, fresh)
+    cut_block = cut_status_block(group)
     summ = _ctx_state(group, "ctxsum").strip()
     sum_block = (
         "更早的对话摘要（已压缩，参考就好，不要主动复述）：\n" + summ + "\n\n"
@@ -931,7 +947,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
