@@ -834,6 +834,51 @@ def image_library_hint(limit=12) -> str:
             + "\n".join(lines))
 
 
+OTHER_GROUP_HINTS = ("另一个群", "其他群", "别的群", "那个群", "新群", "二群",
+                     "其他群聊", "别的群聊", "另一个群聊")
+OTHER_GROUP_RE = re.compile(r"(?<![本这那])[A-Za-z0-9一二三四五六七八九十]群")
+
+
+def _asks_other_group(instruction: str, fresh) -> bool:
+    text = instruction or ""
+    if fresh:
+        text += "\n" + "\n".join((c or "") for _a, c, _t, _b in fresh[-3:])
+    return any(k in text for k in OTHER_GROUP_HINTS) or bool(OTHER_GROUP_RE.search(text))
+
+
+def other_group_context(group: str, instruction: str, fresh) -> str:
+    """本群问起别的群时，才带一小段其他群的公开上下文。
+
+    平时不注入，避免把 A 群消息带进 B 群、或让 B 以为本群知道 A 的事。
+    """
+    if not _asks_other_group(instruction, fresh):
+        return ""
+    now = time.time()
+    groups = [g for g in MEMORY.known_groups() if g != group and not g.startswith("dc:")]
+    groups.sort(key=lambda g: MEMORY.last_activity(g), reverse=True)
+    parts = []
+    for g in groups[:3]:
+        last = MEMORY.last_activity(g)
+        if not last or now - last > 24 * 3600:
+            continue
+        rows = MEMORY.recent_messages(g, minutes=24 * 3600, limit=4)
+        if not rows:
+            continue
+        lines = []
+        for author, content, ts, is_bot in rows[-4:]:
+            name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else (author or "某人")
+            clock = datetime.fromtimestamp(ts).strftime("%H:%M")
+            lines.append(f"[{clock}] {name}: {(content or '').strip()[:120]}")
+        parts.append(f"[群{g[:8]}]\n" + "\n".join(lines))
+    if not parts:
+        return ""
+    return (
+        "其他群的公开上下文（仅当本群有人问起时参考；本群的人不知道这些，"
+        "不要主动提，也不要把它们当成本群已经发生或本群知道的事）：\n"
+        + "\n\n".join(parts) + "\n\n"
+    )
+
+
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
                      fresh=None) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
@@ -857,6 +902,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
     head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
+    cross_block = other_group_context(group, instruction, fresh)
     summ = _ctx_state(group, "ctxsum").strip()
     sum_block = (
         "更早的对话摘要（已压缩，参考就好，不要主动复述）：\n" + summ + "\n\n"
@@ -885,7 +931,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
