@@ -766,13 +766,22 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         fresh = _fresh_rows(group)
     LAST_PROMPT_TS[group] = time.time()
 
+    # 每轮都告诉模型"现在几点"：DSH 会话是跨天持久的，只给消息时间戳时，
+    # 模型会把几小时前的旧消息当成现在（07:04 的暖场说"都三点了"就是这么来的）。
+    now = datetime.now()
+    week = "一二三四五六日"[now.weekday()]
+    now_line = (
+        f"现在是 {now.strftime('%Y-%m-%d %H:%M')}（周{week}，24 小时制）。"
+        "消息里的时间是发生的时刻，不是现在；别把旧消息的时间当成当前时间。\n\n"
+    )
+
     lines = []
     for author, content, ts, is_bot in fresh:
         clock = datetime.fromtimestamp(ts).strftime("%H:%M")
         name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else author
         lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
-    head = "以下是群里刚才的消息（时间 24 小时制）：\n" + "\n".join(lines) if lines else "群里还没有聊天记录。"
+    head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
     summ = _ctx_state(group, "ctxsum").strip()
     sum_block = (
         "更早的对话摘要（已压缩，参考就好，不要主动复述）：\n" + summ + "\n\n"
@@ -801,7 +810,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{sum_block}{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
