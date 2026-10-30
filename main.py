@@ -54,9 +54,14 @@ AT_TARGET_RE = re.compile(r"@([^()\n]{1,32}?)\(([^)\n]{6,})\)")
 # 发送报错里出现这些 = 这个群永远发不进去（群号无效/被踢/无权限），关掉主动发言别再烧 token。
 # 禁言、频控是临时的，不要放进这里。
 PERMANENT_SEND_ERRORS = (
-    "无权限", "不是群成员", "已下线",
+    "无权限", "不是群成员", "非群成员", "已下线",
     "group_id无效", "40011036", "11321", "群不存在",
 )
+
+# botsns 的 ModuleError = 库写错了（调用方式/参数不对，或库本身有 bug），
+# 不是群或网络的问题。这种要单独告诉用户，别混进「发不出去」里。
+OWNER_OPENID = "82952E5885E92B9FACA668D1CC5DF08E"  # 深海渔民（dsh-bot 视角）
+MODULE_ERROR_NOTIFIED: dict[str, float] = {}       # 同一错误 1 小时内只私信一次
 
 logging.basicConfig(
     level=logging.INFO,
@@ -243,6 +248,8 @@ async def handle_group(message, addressed: bool):
             schedule_ambient(group)
         else:
             log.debug("非 @ 消息，仅记入上下文 group=%s", group[:8])
+    except qqexc.ModuleError as exc:
+        await report_module_error(exc, f"handle_group {group[:8]}")
     except Exception:
         log.exception("处理群消息出错 group=%s", group)
 
@@ -298,6 +305,8 @@ async def handle_dc(message):
         await CLIENT.dc.send_message(message.author.openid, text)
         _record_own(group, text)
         log.info("私信回复 %s: %s", who, text[:60])
+    except qqexc.ModuleError as exc:
+        await report_module_error(exc, f"handle_dc {group}")
     except Exception:
         log.exception("处理私信出错")
 
@@ -461,6 +470,49 @@ async def reply_group(group, task, who, msg_id=None, message=None):
 
 # ---------------- 发送 ----------------
 
+async def report_module_error(exc, where: str = "") -> None:
+    """botsns 抛 ModuleError = 我们调库的方式不对（或库本身写错），不是群/网络问题。
+
+    打 ERROR 日志，并私信告诉用户；同一 err_code+消息 1 小时内只发一次，防止刷屏。
+    """
+    code = getattr(exc, "err_code", "?")
+    msg = str(exc) or repr(exc)
+    key = f"{code}:{msg[:80]}"
+    now = time.time()
+    if now - MODULE_ERROR_NOTIFIED.get(key, 0.0) < 3600:
+        return
+    MODULE_ERROR_NOTIFIED[key] = now
+    log.error("botsns 库错误（%s）err_code=%s: %s", where or "-", code, msg)
+    if CLIENT is None:
+        return
+    try:
+        await CLIENT.dc.send_message(
+            OWNER_OPENID,
+            f"🦄 botsns 库错误\n位置：{where or '-'}\nerr_code：{code}\n{msg[:300]}",
+        )
+    except Exception:
+        log.exception("通知用户 botsns 库错误失败（继续）")
+
+
+async def handle_bot_exception(exc, group: str, where: str) -> bool:
+    """按 botsns 的新分类处理发送异常；返回 True = 这个群永久发不进去。"""
+    if isinstance(exc, qqexc.ModuleError):
+        await report_module_error(exc, f"{where} group={group[:8]}")
+        return False  # 库写错不是这个群的问题，别把它静音
+    if isinstance(exc, qqexc.PermissionDenied):
+        log.warning("发送被拒（%s，无权限）：%s", group[:8], str(exc)[:160])
+        return True
+    if isinstance(exc, qqexc.RateLimited):
+        log.warning("发送被拒（%s，限频）：%s", group[:8], str(exc)[:160])
+        return False
+    if isinstance(exc, qqexc.Expired):
+        log.warning("发送被拒（%s，已过期）：%s", group[:8], str(exc)[:160])
+        return False
+    # BadArguments / BadSituation / UnknownError：沿用原来的关键词判断
+    log.warning("发送被拒（%s）：%s", group[:8], str(exc)[:200])
+    return any(k in str(exc) for k in PERMANENT_SEND_ERRORS)
+
+
 async def apply_image_scopes(text: str) -> str:
     """模型用 [[img-scope:描述|适用范围]] 更新图库；这条不发给群。"""
     for m in IMG_SCOPE_RE.finditer(text or ""):
@@ -606,11 +658,12 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
                 MEMORY.mark_bot_spoke(group)
                 sent_count += 1
                 log.info("群回复%s %s: %s", "（引用）" if quote else "", group[:8], part[:80])
-            except (qqexc.BadSituation, qqexc.BadArguments, qqexc.UnknownError) as exc:
-                msg = str(exc)
-                log.warning("发送被拒（%s）：%s", group[:8], msg[:200])
+            except qqexc.BotExceptions as exc:
+                # botsns 已把发送错误分好类：ModuleError=库写错 / PermissionDenied /
+                # RateLimited / Expired / BadArguments / BadSituation / UnknownError
+                permanent = await handle_bot_exception(exc, group, "send_group")
                 # 只有"这个群永远发不进去"才关掉主动性；禁言/频控是临时的，别把暖场整个停掉
-                if any(k in msg for k in PERMANENT_SEND_ERRORS):
+                if permanent:
                     MEMORY.set_group_flag(group, "proactive_ok", False)
                     log.warning("这个群发不进去，关掉主动发言 group=%s", group[:8])
                 break
@@ -851,6 +904,12 @@ def group_allows_proactive(group: str) -> bool:
     try:
         if CLIENT is not None and CLIENT.public.get_group_send_with_mention(group):
             return False
+    except qqexc.ModuleError as exc:
+        # 库写错：报给用户，但别因为查不到就把这个群静音
+        try:
+            asyncio.create_task(report_module_error(exc, f"group_allows_proactive {group[:8]}"))
+        except RuntimeError:
+            log.error("botsns 库错误（group_allows_proactive %s）: %s", group[:8], exc)
     except Exception:
         pass
     return True
@@ -1748,7 +1807,11 @@ async def main():
         BASE_DIR / "persona.md",
     )
 
-    CLIENT = QQClient(appid, appsecret, host, port, Callbacks())
+    try:
+        CLIENT = QQClient(appid, appsecret, host, port, Callbacks())
+    except qqexc.ModuleError as exc:
+        await report_module_error(exc, "QQClient() 构造")
+        raise
 
     send_token = CONFIG.get("send", "token", fallback="").strip()
 
@@ -1766,11 +1829,16 @@ async def main():
             row = await resolve_image(image)   # 8 位哈希精确找，否则按描述匹配
             if not row:
                 return {"ok": False, "error": "image not found"}
-            ok = await media.upload_and_send(
-                CLIENT, group, Path(row[0]),
-                base_url=CONFIG.get("bot", "image_base", fallback=""),
-                public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
-            )
+            try:
+                ok = await media.upload_and_send(
+                    CLIENT, group, Path(row[0]),
+                    base_url=CONFIG.get("bot", "image_base", fallback=""),
+                    public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
+                )
+            except qqexc.ModuleError as exc:
+                await report_module_error(exc, "send_api image")
+                return {"ok": False, "error": "botsns 库错误（详见日志/私信）",
+                        "err_code": getattr(exc, "err_code", None)}
             return {"ok": ok, "sent": "image", "desc": row[1]}
         if not group or not text:
             return {"ok": False, "error": "group and text required"}
@@ -1790,6 +1858,10 @@ async def main():
             return {"ok": False, "error": "openid and text required"}
         try:
             await CLIENT.dc.send_message(openid, text)
+        except qqexc.ModuleError as exc:
+            await report_module_error(exc, "send_dc_api")
+            return {"ok": False, "error": "botsns 库错误（详见日志/私信）",
+                    "err_code": getattr(exc, "err_code", None)}
         except Exception as exc:
             log.exception("私信发送失败")
             return {"ok": False, "error": str(exc)}
@@ -1985,7 +2057,11 @@ async def main():
     asyncio.create_task(people_loop())
     asyncio.create_task(review_loop())
     asyncio.create_task(housekeeping_loop())
-    await CLIENT.run()
+    try:
+        await CLIENT.run()
+    except qqexc.ModuleError as exc:
+        await report_module_error(exc, "CLIENT.run()")
+        raise
 
 
 if __name__ == "__main__":

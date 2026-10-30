@@ -697,3 +697,20 @@
   `GET /people?limit=`。
 - 表情表态：查官方文档确认**仅频道（guild/channel）支持**，群聊没有 reactions 接口，不做。
 - 单测：`reference/new_features_check.py`，people/mood/events/review 全覆盖，用 `:memory:`。
+
+## 2026-10-30 · v0.61 适配新版 botsns 异常分类
+
+- 新版 botsns 的发送异常改为继承 `BotExceptions`：`ModuleError`（库写错）、
+  `PermissionDenied`、`RateLimited`、`Expired`、`BadArguments`、`BadSituation`、`UnknownError`。
+- 所有调 botsns 的地方都单独捕 `ModuleError`：打 ERROR 日志，并**私信告诉用户**
+  （`OWNER_OPENID`，同一 err_code+消息 1 小时内只发一次，防刷屏）。覆盖：
+  `send_group`、`handle_group`、`handle_dc`、`send_dc_api`、`send_api` 发图、
+  `group_allows_proactive`、`QQClient()` 构造、`CLIENT.run()`。
+- `handle_bot_exception()` 按新分类分流：`ModuleError` 只告警**不关这个群**；
+  `PermissionDenied` 永久关 `proactive_ok`；`RateLimited` / `Expired` 只记日志；
+  其余沿用 `PERMANENT_SEND_ERRORS` 关键词兜底。
+- 修关键词漏匹配：`BadSituation("机器人非群成员")` 原来匹配不上「不是群成员」，
+  补 `"非群成员"`。
+- `media.upload_and_send()` 不再吞 `ModuleError`，上抛给调用方统一报告；
+  普通发图失败仍返回 False。
+- 单测：`reference/botsns_errors_check.py`（10 条分类 + 去重 + 无 CLIENT 兜底）。
