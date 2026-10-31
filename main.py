@@ -38,9 +38,11 @@ import media  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
 from memory import Memory  # noqa: E402
 from quote import RE_QUOTE_REF, refs_block, take_marker  # noqa: E402
+from textfix import strip_meta_leak  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
+INBOX_RAW_DIR = BASE_DIR / "inbox_raw"   # 临时：原样外存群附件，调试完删
 # [[img:3478444e]] 精确哈希，或 [[img:震惊脸]] 按描述找
 IMG_MARKER = re.compile(r"\[\[img:([^\[\]\n]{1,60})\]\]")
 IMG_SEARCH_RE = re.compile(r"\[\[img-search:([^\[\]\n]{1,80})\]\]")
@@ -131,7 +133,13 @@ async def enrich_attachments(message, content: str) -> str:
         url = a.get("url") if isinstance(a, dict) else getattr(a, "url", None)
         if not url:
             continue
-        got = await media.download(url, IMAGES_DIR)
+        filename = a.get("filename") if isinstance(a, dict) else getattr(a, "filename", None)
+        ctype = a.get("content_type") if isinstance(a, dict) else getattr(a, "content_type", None)
+        size = a.get("size") if isinstance(a, dict) else getattr(a, "size", None)
+        log.info("附件字段 filename=%r content_type=%r size=%r", filename, ctype, size)
+        got = await media.download(
+            url, IMAGES_DIR, raw_dir=INBOX_RAW_DIR, raw_name=filename or "",
+        )
         if not got:
             marks.append("[图]")
             continue
@@ -301,6 +309,11 @@ async def handle_dc(message):
         text = await BRAIN.respond(rows, "dc", who, extra=extra, title="你们的私聊记录")
         if not text:
             return
+        text, leaked = strip_meta_leak(text)   # 2026-10-31 思考溢出兜底
+        if leaked:
+            log.warning("私信回复带自我修改，已截到最终那句: %r", text[:80])
+            if not text:
+                return
         await asyncio.sleep(_typing_delay(text))
         await CLIENT.dc.send_message(message.author.openid, text)
         _record_own(group, text)
@@ -454,7 +467,9 @@ async def reply_group(group, task, who, msg_id=None, message=None):
 
     if not text:  # 只有桥挂了才会走到这里
         rows = MEMORY.recent_messages(group, minutes=90)
-        text = await BRAIN.respond(rows, task, who)
+        text, leaked = strip_meta_leak(await BRAIN.respond(rows, task, who))
+        if leaked:
+            log.warning("兜底模型带自我修改，已截到最终那句 task=%s: %r", task, str(text)[:80])
     if not text:
         log.info("模型选择沉默 task=%s", task)
         return
@@ -1395,6 +1410,10 @@ async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
         return None
     if not text:
         return None
+    text, leaked = strip_meta_leak(text)   # 模型偶尔把"等等/改一下"写进正文
+    if leaked:
+        log.warning("模型把思考写进正文，已只留最后候选 group=%s: %r",
+                    group[:8], text[:80])
     if text.strip().upper().startswith("SKIP"):
         return None
     return text

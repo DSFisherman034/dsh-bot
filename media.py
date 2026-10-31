@@ -25,6 +25,7 @@ import shutil
 import json
 import logging
 import math
+import time
 from array import array
 from pathlib import Path
 
@@ -123,8 +124,13 @@ def prepare(path: Path, edge: int = DEFAULT_EDGE,
         return (mime, raw) if len(raw) <= max_bytes else None
 
 
-async def download(url: str, images_dir: Path, timeout: float = 15.0) -> tuple[str, Path] | None:
-    """下载一张图，返回 (hash, 本地路径)。"""
+async def download(url: str, images_dir: Path, timeout: float = 15.0,
+                   raw_dir: Path | None = None,
+                   raw_name: str = "") -> tuple[str, Path] | None:
+    """下载一张图，返回 (hash, 本地路径)。
+
+    raw_dir 不为空时，把原始字节（不管是不是图片）外存一份，调试用。
+    """
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url)
@@ -141,6 +147,12 @@ async def download(url: str, images_dir: Path, timeout: float = 15.0) -> tuple[s
         return None
 
     h = digest(data)
+    if raw_dir is not None:
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)[:64] or "attachment"
+        dest = raw_dir / f"{int(time.time())}_{h[:16]}_{safe}"
+        dest.write_bytes(data)
+        log.info("附件原件已外存：%s（%s 字节）", dest, len(data))
     mime = sniff(data)
     if mime is None:
         # 认不出来就别按图片处理，让上层留占位
