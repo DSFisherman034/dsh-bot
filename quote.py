@@ -22,10 +22,11 @@ def refs_block(refs, content_chars: int = 40) -> str:
         lines.append(f"#{i} [{clock}] {author or '某人'}: {text}")
     newest = len(refs)
     return (
-        f"群里最近几条（引用编号 #1 最早、#{newest} 最新）：\n"
+        f"群里最近几条（编号 #1 最早、#{newest} 最新）：\n"
         + "\n".join(lines)
-        + "\n每条回复最前面都写 [[引:#编号]]，指明你接的是哪条（编号换成上面的数字，"
-        f"接最新那条就写 [[引:#{newest}]]，系统不会引）。\n\n"
+        + "\n回复最前面写 [[引:#编号]]，指明你接的是哪条（编号换成上面的数字，"
+        f"接最新那条就写 [[引:#{newest}]]，系统不会引）。\n"
+        "这个编号只指群消息，和网页来源无关；群聊里不要贴 URL、也不要 markdown 链接。\n\n"
     )
 
 

@@ -938,7 +938,7 @@ def bubble_hint(group: str) -> str:
     if len(hist) >= 4 and all(n <= 1 for n in hist):
         return "你最近四条都是一条，这轮如果能自然分成「反应 + 补充」，就用 <🦄发送> 分两条；别硬拆。"
     if sum(1 for n in hist if n >= 2) >= 3:
-        return "你最近分条有点多，这轮能一条说完就一条。"
+        return "你最近分条有点多，这轮尽量一条说完；能一条就一条，写成两条了也照发，不用回头改。"
     return "普通闲聊大约一半适合分两条；这轮看情况，别硬拆。"
 
 
@@ -1209,7 +1209,8 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     if ref_block:
         tail += (
             "\n回复最前面必须写 [[引:#编号]]，标明你在接上面列表里的哪一条；"
-            "写错或漏写就会引错人。"
+            "写错或漏写就会引错人。这个编号只指群消息，跟网页来源无关，"
+            "群聊里不用贴链接、也不用交代来源。"
         )
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
