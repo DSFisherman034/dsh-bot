@@ -752,3 +752,13 @@
 - 拼提示词的 `split_line` 原来写「默认一条」，和人设「普通闲聊大约一半分两条」直接对撞；
   改成「能一条就一条，自然停顿处想分就写 <🦄发送> 分两条」。
 - 全量单测过（quote_check / quote_prompt_check / meta_leak_check）。已 install+restart（14:16）。
+
+## 2026-10-31 · v0.63 只读 /context：看清这一轮塞了什么
+
+- 用户反馈「群里看不出记忆/人物/事件有没有在跑」。新增 `GET /context`（带 `x-token`）：
+  返回下一轮会注入的群记忆（最近 8 条）、人物印象块（`who` 指定，默认最后发言的人）、
+  状态行、待发事件、上下文摘要字数、引用候选列表。只读，不调模型、不发群。
+- 用法：`curl -s localhost:3704/context?who=<名字> -H "x-token: $(awk -F'= ' '/^token/{print $2;exit}' config.ini)"`
+- 顺带查出的现状（不是本版改的，记在这里）：`mood_line()` 的 `fed_ts` 没存时默认「5 小时前」，
+  每次调用都重置 → hunger 恒 20，**「饿」永远不会注入**；实际只会注入「记仇」（5 分钟）和 2–7 点的「困」。
+- 已 install+restart（14:38）。

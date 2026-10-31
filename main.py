@@ -2070,6 +2070,45 @@ async def main():
             for name, note, ts, count in rows
         ]}
 
+    @CLIENT.app.app.get("/context")
+    async def context_api(request: Request):
+        """看下一轮会往模型里塞什么：群记忆 / 人物印象 / 状态 / 待发事件 / 引用候选。
+
+        只读、不调模型、不发群；参数 `group` 不传就用最近 24h 最活跃的群。
+        """
+        token = request.headers.get("x-token") or request.query_params.get("token")
+        if not send_token or token != send_token:
+            return {"ok": False, "error": "unauthorized"}
+        group = (request.query_params.get("group") or "").strip()
+        if not group:
+            groups = MEMORY.active_groups(minutes=60 * 24)
+            if not groups:
+                return {"ok": False, "error": "没有活跃群，传 group 指定"}
+            group = groups[0]
+        mem = MEMORY.recent_memories(group, limit=8)
+        refs = MEMORY.recent_external(group, SELF_NAMES, limit=8)
+        who = (request.query_params.get("who") or "").strip()
+        if not who and refs:
+            who = refs[-1][1]
+        ev = events.collect(MEMORY)
+        return {
+            "ok": True,
+            "group": group,
+            "now": datetime.now().strftime("%m-%d %H:%M"),
+            "memories": [
+                {"t": datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"), "text": text}
+                for ts, _kind, text in mem
+            ],
+            "people": people_block(group, who).strip(),
+            "mood": mood_line().strip(),
+            "ctxsum_chars": len(_ctx_state(group, "ctxsum").strip()),
+            "event": ev,
+            "refs": [
+                {"k": i + 1, "author": a, "text": (c or "")[:30]}
+                for i, (_m, a, c, _t) in enumerate(refs)
+            ],
+        }
+
     log.info("DSH Bot 启动 appid=%s %s:%s model=%s", appid, host, port, BRAIN.model)
     asyncio.create_task(start_bridge())
     asyncio.create_task(heartbeat_loop())
