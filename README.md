@@ -204,3 +204,9 @@ curl -s localhost:3704/debug_reply -H "x-token: $TOKEN" -H 'Content-Type: applic
 
 - **每次改动（代码/人设/文档）后必须推 git**：`git add -A && git commit -m "..." && git push`。
 - `config.ini`、`data.db` 等本地文件永不入库（见 `.gitignore`）。
+
+## 来源与许可
+
+人设气质与部分梗取材自社区二创「大肥鱼」：`dafeiyu-persona`（MIT，上游仓库 2026-10-31 起 404，
+本地存档在 `~/dsh/reference/dafeiyu-persona/`）。图库另有 nekowhale（CC BY-NC 4.0）与
+dsh-meme（MIT）。完整声明与许可全文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -762,3 +762,13 @@
 - 顺带查出的现状（不是本版改的，记在这里）：`mood_line()` 的 `fed_ts` 没存时默认「5 小时前」，
   每次调用都重置 → hunger 恒 20，**「饿」永远不会注入**；实际只会注入「记仇」（5 分钟）和 2–7 点的「困」。
 - 已 install+restart（14:38）。
+
+## 2026-10-31 · v0.63.1 第三方许可 + 社区人设存档
+
+- 收到社区人设 `dafeiyu-persona`（大肥鱼，MIT）；上游仓库 `ERUIHNIYHBKBNF/dafeiyu-persona`
+  已 404（账号在，仓库不可见），原样存档到 `~/dsh/reference/dafeiyu-persona/`，
+  附 `ARCHIVE-NOTE.md`（来源/许可/404 结论）和 `COMPARE-dsh-bot.md`（逐条对照）。
+- 新增 `THIRD_PARTY_NOTICES.md`：dafeiyu-persona（MIT，全文）、nekowhale 322 张（CC BY-NC 4.0，
+  可以叫我云大人 / kiriyuki.com）、dsh-meme 24 张（MIT）、dsh-nekowhale-stickers（仅本地参考）。
+  README 末尾加「来源与许可」指向它。
+- 人设本身**未改**；对照结论里的三条待改（退场规则、禁心声、投喂降级）等用户确认。
