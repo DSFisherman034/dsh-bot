@@ -1189,7 +1189,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     mood_blk = mood_line()
     if group_allows_proactive(group):
         split_line = (
-            "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
+            "只输出要发到群里的话本身；能一条就一条，自然停顿处想分就写 <🦄发送> 分两条；"
             "决定不说话就只输出 SKIP。\n"
         )
     else:
