@@ -806,5 +806,8 @@
      + 正反例（旧任务拽进来 = 错；接他的话翻个面 = 对）。
 - 单测：`reference/drift_prompt_check.py`（6 项：摘要边界/记忆边界/梗口径/内容还在/旧口径已删）；
   原有 quote_check / quote_prompt_check / meta_leak_check 不回归。已 install+restart（03:07）。
+- A/B 验证（03:10）：把 02:51 那轮的历史 prompt 原样重放（`~/dsh/tmp/replay.py`，起独立 `dsh --profile qq`），
+  换成打了补丁的 prompt 跑 2 次，都没再提双前缀/旧任务，改成接「你怎么不信我」：
+  「信啊，就是不太信你敢让她听见」「信信信，你俩早点睡」。样本小（对照只有原生产那 1 次），算指示性证据。
 - 同日：`dsh-bot` 仓库打附注标签 `best` = v0.57（`35ebf91`，2026-10-29 18:53 线上），
   即「所以我一次都没舍得用」那段；说明见 `~/dsh/reference/best-2026-10-29.md`。
