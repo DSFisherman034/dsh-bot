@@ -107,7 +107,7 @@ def _history(group: str, memory) -> list[str]:
 
 
 def _image(group: str, memory) -> list[str]:
-    """图库配文：挑一张图，配一句和当下有关的吐槽。"""
+    """图库配文：挑一张图，配一句就图论图的吐槽。"""
     try:
         rows = memory.image_library(limit=80)
     except Exception:
@@ -119,7 +119,8 @@ def _image(group: str, memory) -> list[str]:
             continue
         out.append(
             f"图库里有这张图：{desc[:50]}（适用范围：{(scope or '通用')[:30]}）。"
-            f"想发就用 [[img:{desc[:24]}]]，配一句当下的话"
+            f"想发就用 [[img:{desc[:24]}]]，配一句就图论图的话；"
+            f"图跟群里最近聊的接不上就说图本身，别硬接"
         )
     return out
 
