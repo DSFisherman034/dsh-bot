@@ -902,8 +902,8 @@ def meme_budget_hint(group: str) -> str:
         return "你最近两条回复都用了梗，这一轮收住，别再用梗，正常接话。"
     if used:
         return "你最近刚用过一次梗，这一轮不是特别合适就别再用。"
-    return ("梗只从眼前长：对方刚说的词、刚发生的事。"
-            "摘要、群记忆里的旧事不算梗——对方没提就别自己翻出来。")
+    return ("梗从眼前长最稳：对方刚说的词、刚发生的事。旧事也能接，但要有钩子——"
+            "他这轮提到相关的词，你能一句话把现在和过去连上；没钩子就别硬拐。")
 
 
 def group_allows_proactive(group: str) -> bool:
@@ -1173,9 +1173,9 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     cut_block = cut_status_block(group)
     summ = _ctx_state(group, "ctxsum").strip()
     sum_block = (
-        "更早的对话摘要（已压缩，只用来懂背景；都是过去的事，不是这一轮的话题）：\n"
+        "更早的对话摘要（已压缩，只用来懂背景；这轮的谈资以对方刚说的为准）：\n"
         + summ
-        + "\n（以上是旧事。对方这轮没主动提起，就不要翻出来接话、玩梗或提醒他。）\n\n"
+        + "\n（旧事要接，得等对方这轮露出钩子；没钩子就别说。旧任务只能拿来打自己的脸，别拿去催他。）\n\n"
     ) if summ else ""
     mem = MEMORY.recent_memories(group, limit=8)
     mem_block = ""
@@ -1185,9 +1185,9 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
             for ts, _kind, text in mem
         ]
         mem_block = (
-            "群内记忆（过去的事，只用来懂背景；不是这一轮的话题）：\n"
+            "群内记忆（过去的事，只用来懂背景；这轮的谈资以对方刚说的为准）：\n"
             + "\n".join(mem_lines)
-            + "\n（同上：对方没提，就别翻出来；事没办完也别催，他自己会提。）\n\n"
+            + "\n（同上：旧事不是不能提，得顺着对方这轮的话提；事没办完也别催。）\n\n"
         )
     people_blk = people_block(group, who, fresh)
     mood_blk = mood_line()
