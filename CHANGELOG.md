@@ -654,3 +654,17 @@
   备份：`/opt/dsh-bot/data.db.bak-20261102-1930`。
 - 预期：prompt 回到 v0.57 的大小（无人物印象、无编号列表、摘要/记忆只是背景），
   下一轮起是全新会话，旧话题不再每轮重复出现。
+
+## 2026-11-02 · v0.64.1 补回 v0.59 / v0.61 / v0.63.1
+
+- v0.64 回退时把这三项一起撤了，用户点名补回。选它们的共同理由：**都不碰语气、不往 prompt 里灌上下文**。
+- v0.59 截断标注：恢复 `clip_for_prompt()`，用在 `build_dsh_prompt`（200 字）、私信群上下文（160）、
+  跨群上下文（120）；被截时末尾写「…（内容过长已截断，剩 N 字）」，别让模型以为话说完了。
+- v0.61 botsns 异常分类：恢复 `report_module_error()` / `handle_bot_exception()`；
+  `ModuleError` 只打 ERROR + 私信用户（同错误 1h 去重），**不静音这个群**；`PermissionDenied` 才永久关
+  `proactive_ok`；`RateLimited`/`Expired` 只记日志；其余沿用 `PERMANENT_SEND_ERRORS` 关键词兜底；
+  `media.upload_and_send` 不再吞 `ModuleError`。单测 `reference/botsns_errors_check.py` 全部通过。
+- v0.63.1 第三方许可：`THIRD_PARTY_NOTICES.md` + README 末尾「来源与许可」；社区人设存档在
+  `~/dsh/reference/dafeiyu-persona/`（v0.63.1 当时就没改人设，现在也不改）。
+- 仍然不补：v0.58 引用编号、v0.60 人物/状态/事件/复盘、v0.62 的提示词改动、v0.63.x 的 callback 补丁——
+  这些才是把旧话题反复喂给模型的那部分。

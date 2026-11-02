@@ -30,6 +30,11 @@ from pathlib import Path
 
 import httpx
 
+try:  # 独立测试时不一定有 botsns；有的话 ModuleError 要往上抛
+    from qqbot.botsns.QQClient import exceptions as qqexc
+except Exception:  # pragma: no cover
+    qqexc = None
+
 log = logging.getLogger("media")
 
 MAX_DESC = 60
@@ -312,6 +317,8 @@ async def upload_and_send(client, group: str, path: Path, msg_id: str | None = N
                     log.warning("发图失败：%s", json.dumps(body, ensure_ascii=False)[:200])
                     return False
                 return True
-    except Exception:
+    except Exception as exc:
+        if qqexc is not None and isinstance(exc, qqexc.ModuleError):
+            raise  # 库写错：交给调用方 report_module_error，别当成普通发图失败吞掉
         log.exception("发图出错")
         return False
