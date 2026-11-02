@@ -25,16 +25,10 @@ import shutil
 import json
 import logging
 import math
-import time
 from array import array
 from pathlib import Path
 
 import httpx
-
-try:  # 独立测试时不一定有 botsns；有的话 ModuleError 要往上抛
-    from qqbot.botsns.QQClient import exceptions as qqexc
-except Exception:  # pragma: no cover
-    qqexc = None
 
 log = logging.getLogger("media")
 
@@ -124,13 +118,8 @@ def prepare(path: Path, edge: int = DEFAULT_EDGE,
         return (mime, raw) if len(raw) <= max_bytes else None
 
 
-async def download(url: str, images_dir: Path, timeout: float = 15.0,
-                   raw_dir: Path | None = None,
-                   raw_name: str = "") -> tuple[str, Path] | None:
-    """下载一张图，返回 (hash, 本地路径)。
-
-    raw_dir 不为空时，把原始字节（不管是不是图片）外存一份，调试用。
-    """
+async def download(url: str, images_dir: Path, timeout: float = 15.0) -> tuple[str, Path] | None:
+    """下载一张图，返回 (hash, 本地路径)。"""
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url)
@@ -147,12 +136,6 @@ async def download(url: str, images_dir: Path, timeout: float = 15.0,
         return None
 
     h = digest(data)
-    if raw_dir is not None:
-        raw_dir.mkdir(parents=True, exist_ok=True)
-        safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in raw_name)[:64] or "attachment"
-        dest = raw_dir / f"{int(time.time())}_{h[:16]}_{safe}"
-        dest.write_bytes(data)
-        log.info("附件原件已外存：%s（%s 字节）", dest, len(data))
     mime = sniff(data)
     if mime is None:
         # 认不出来就别按图片处理，让上层留占位
@@ -329,8 +312,6 @@ async def upload_and_send(client, group: str, path: Path, msg_id: str | None = N
                     log.warning("发图失败：%s", json.dumps(body, ensure_ascii=False)[:200])
                     return False
                 return True
-    except Exception as exc:
-        if qqexc is not None and isinstance(exc, qqexc.ModuleError):
-            raise  # 库写错：交给调用方 report_module_error，别当成普通发图失败吞掉
+    except Exception:
         log.exception("发图出错")
         return False

@@ -32,17 +32,14 @@ from qqbot.botsns.QQClient import exceptions as qqexc  # noqa: E402
 
 from brain import Brain  # noqa: E402
 from render import render_incoming  # noqa: E402
-import events  # noqa: E402
 import material  # noqa: E402
 import media  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
 from memory import Memory  # noqa: E402
-from quote import RE_QUOTE_REF, refs_block, take_marker  # noqa: E402
 from textfix import strip_meta_leak  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
-INBOX_RAW_DIR = BASE_DIR / "inbox_raw"   # 临时：原样外存群附件，调试完删
 # [[img:3478444e]] 精确哈希，或 [[img:震惊脸]] 按描述找
 IMG_MARKER = re.compile(r"\[\[img:([^\[\]\n]{1,60})\]\]")
 IMG_SEARCH_RE = re.compile(r"\[\[img-search:([^\[\]\n]{1,80})\]\]")
@@ -56,14 +53,9 @@ AT_TARGET_RE = re.compile(r"@([^()\n]{1,32}?)\(([^)\n]{6,})\)")
 # 发送报错里出现这些 = 这个群永远发不进去（群号无效/被踢/无权限），关掉主动发言别再烧 token。
 # 禁言、频控是临时的，不要放进这里。
 PERMANENT_SEND_ERRORS = (
-    "无权限", "不是群成员", "非群成员", "已下线",
+    "无权限", "不是群成员", "已下线",
     "group_id无效", "40011036", "11321", "群不存在",
 )
-
-# botsns 的 ModuleError = 库写错了（调用方式/参数不对，或库本身有 bug），
-# 不是群或网络的问题。这种要单独告诉用户，别混进「发不出去」里。
-OWNER_OPENID = "82952E5885E92B9FACA668D1CC5DF08E"  # 深海渔民（dsh-bot 视角）
-MODULE_ERROR_NOTIFIED: dict[str, float] = {}       # 同一错误 1 小时内只私信一次
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,14 +73,11 @@ BRIDGE: DshBridge | None = None
 LAST_PROMPT_TS: dict[str, float] = {}
 # 消息 id 游标：给 DSH 的增量按 id 算，不用本机时间（平台时间慢 1-2 秒会漏消息）
 LAST_SEEN_ID: dict[str, int] = {}
-# 每轮提示词里给的「#编号」列表：模型回复里的 [[引:#k]] 靠它换回 msg_id
-LAST_REFS: dict[str, list] = {}
 PENDING_SEEN: dict[str, int] = {}
 LAST_BUBBLES: dict[str, list[int]] = {}
 LAST_IMAGES: dict[str, list[int]] = {}
 LAST_CUT: dict[str, tuple[int, int]] = {}
 GROUP_SEND_LOCKS: dict[str, asyncio.Lock] = {}
-START_TS = time.time()   # 进程启动时刻：事件触发用「刚启动」判断，不用来做元话题
 
 # 上下文滚动压缩：本群会话窗口攒到 50 条（含机器人自己的发言）就把最早 30 条
 # 压成摘要，只留最近 20 条原文；压缩后清掉 DSH 会话，下一轮用「摘要 + 20 条」重开。
@@ -133,13 +122,7 @@ async def enrich_attachments(message, content: str) -> str:
         url = a.get("url") if isinstance(a, dict) else getattr(a, "url", None)
         if not url:
             continue
-        filename = a.get("filename") if isinstance(a, dict) else getattr(a, "filename", None)
-        ctype = a.get("content_type") if isinstance(a, dict) else getattr(a, "content_type", None)
-        size = a.get("size") if isinstance(a, dict) else getattr(a, "size", None)
-        log.info("附件字段 filename=%r content_type=%r size=%r", filename, ctype, size)
-        got = await media.download(
-            url, IMAGES_DIR, raw_dir=INBOX_RAW_DIR, raw_name=filename or "",
-        )
+        got = await media.download(url, IMAGES_DIR)
         if not got:
             marks.append("[图]")
             continue
@@ -241,11 +224,6 @@ async def handle_group(message, addressed: bool):
             content, is_bot=False, ts=_ts(message.timestamp),
         )
         MEMORY.ensure_group(group)
-        if not is_bot_author:
-            MEMORY.touch_person(
-                message.author.openid, message.author.username, _ts(message.timestamp)
-            )
-            bump_mood(content)
 
         if addressed:
             await reply_group(group, "addressed", message.author.username, msg_id=message.id, message=message)
@@ -256,8 +234,6 @@ async def handle_group(message, addressed: bool):
             schedule_ambient(group)
         else:
             log.debug("非 @ 消息，仅记入上下文 group=%s", group[:8])
-    except qqexc.ModuleError as exc:
-        await report_module_error(exc, f"handle_group {group[:8]}")
     except Exception:
         log.exception("处理群消息出错 group=%s", group)
 
@@ -295,7 +271,7 @@ async def handle_dc(message):
                     for author, content, ts, is_bot in gr:
                         clock = datetime.fromtimestamp(ts).strftime("%H:%M")
                         name = "你" if is_bot else (author or "某人")
-                        gr_lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 160)}")
+                        gr_lines.append(f"[{clock}] {name}: {(content or '').strip()[:160]}")
                     parts.append("群里最近的消息（群里的人都知道）：\n" + "\n".join(gr_lines))
                 if parts:
                     extra = (
@@ -318,8 +294,6 @@ async def handle_dc(message):
         await CLIENT.dc.send_message(message.author.openid, text)
         _record_own(group, text)
         log.info("私信回复 %s: %s", who, text[:60])
-    except qqexc.ModuleError as exc:
-        await report_module_error(exc, f"handle_dc {group}")
     except Exception:
         log.exception("处理私信出错")
 
@@ -350,14 +324,9 @@ async def _ambient_round(group):
         if not text:
             log.info("插话跳过[模型决定不说] group=%s", group[:8])
             return
-        text, ref_quote, ref_k = take_marker(text, LAST_REFS.get(group, []))
-        if not text:
-            log.info("插话跳过[只剩引用标记] group=%s", group[:8])
-            return
-        log_quote_ref(group, ref_k, ref_quote)
 
         await asyncio.sleep(_typing_delay(text))
-        quote = ref_quote or quote_for_ambient(group, quote_since, text)
+        quote = quote_for_ambient(group, quote_since, text)
         await send_group(group, text, msg_id=None, quote_id=quote, since_id=cut_id)
     except Exception:
         log.exception("插话回合出错 group=%s", group[:8])
@@ -473,60 +442,11 @@ async def reply_group(group, task, who, msg_id=None, message=None):
     if not text:
         log.info("模型选择沉默 task=%s", task)
         return
-    text, ref_quote, ref_k = take_marker(text, LAST_REFS.get(group, []))
-    if not text:
-        log.info("只回了引用标记，没有正文 task=%s", task)
-        return
-    log_quote_ref(group, ref_k, ref_quote)
-    quote = ref_quote or quote
     await asyncio.sleep(_typing_delay(text))
     await send_group(group, text, msg_id=msg_id, quote_id=quote, since_id=cut_id)
 
 
 # ---------------- 发送 ----------------
-
-async def report_module_error(exc, where: str = "") -> None:
-    """botsns 抛 ModuleError = 我们调库的方式不对（或库本身写错），不是群/网络问题。
-
-    打 ERROR 日志，并私信告诉用户；同一 err_code+消息 1 小时内只发一次，防止刷屏。
-    """
-    code = getattr(exc, "err_code", "?")
-    msg = str(exc) or repr(exc)
-    key = f"{code}:{msg[:80]}"
-    now = time.time()
-    if now - MODULE_ERROR_NOTIFIED.get(key, 0.0) < 3600:
-        return
-    MODULE_ERROR_NOTIFIED[key] = now
-    log.error("botsns 库错误（%s）err_code=%s: %s", where or "-", code, msg)
-    if CLIENT is None:
-        return
-    try:
-        await CLIENT.dc.send_message(
-            OWNER_OPENID,
-            f"🦄 botsns 库错误\n位置：{where or '-'}\nerr_code：{code}\n{msg[:300]}",
-        )
-    except Exception:
-        log.exception("通知用户 botsns 库错误失败（继续）")
-
-
-async def handle_bot_exception(exc, group: str, where: str) -> bool:
-    """按 botsns 的新分类处理发送异常；返回 True = 这个群永久发不进去。"""
-    if isinstance(exc, qqexc.ModuleError):
-        await report_module_error(exc, f"{where} group={group[:8]}")
-        return False  # 库写错不是这个群的问题，别把它静音
-    if isinstance(exc, qqexc.PermissionDenied):
-        log.warning("发送被拒（%s，无权限）：%s", group[:8], str(exc)[:160])
-        return True
-    if isinstance(exc, qqexc.RateLimited):
-        log.warning("发送被拒（%s，限频）：%s", group[:8], str(exc)[:160])
-        return False
-    if isinstance(exc, qqexc.Expired):
-        log.warning("发送被拒（%s，已过期）：%s", group[:8], str(exc)[:160])
-        return False
-    # BadArguments / BadSituation / UnknownError：沿用原来的关键词判断
-    log.warning("发送被拒（%s）：%s", group[:8], str(exc)[:200])
-    return any(k in str(exc) for k in PERMANENT_SEND_ERRORS)
-
 
 async def apply_image_scopes(text: str) -> str:
     """模型用 [[img-scope:描述|适用范围]] 更新图库；这条不发给群。"""
@@ -603,7 +523,6 @@ async def _confirm_continue(group, since_id, remaining, sent_count):
 async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
-    text = RE_QUOTE_REF.sub("", text)
     text = await apply_image_scopes(text)
     if not group_allows_proactive(group):
         # 这类群不允许主动消息：即使模型写了标记，也合并成一条，别拆
@@ -673,12 +592,11 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
                 MEMORY.mark_bot_spoke(group)
                 sent_count += 1
                 log.info("群回复%s %s: %s", "（引用）" if quote else "", group[:8], part[:80])
-            except qqexc.BotExceptions as exc:
-                # botsns 已把发送错误分好类：ModuleError=库写错 / PermissionDenied /
-                # RateLimited / Expired / BadArguments / BadSituation / UnknownError
-                permanent = await handle_bot_exception(exc, group, "send_group")
+            except (qqexc.BadSituation, qqexc.BadArguments, qqexc.UnknownError) as exc:
+                msg = str(exc)
+                log.warning("发送被拒（%s）：%s", group[:8], msg[:200])
                 # 只有"这个群永远发不进去"才关掉主动性；禁言/频控是临时的，别把暖场整个停掉
-                if permanent:
+                if any(k in msg for k in PERMANENT_SEND_ERRORS):
                     MEMORY.set_group_flag(group, "proactive_ok", False)
                     log.warning("这个群发不进去，关掉主动发言 group=%s", group[:8])
                 break
@@ -713,18 +631,6 @@ def _quote_mode() -> str:
 
 def _quote_stale() -> float:
     return CONFIG.getfloat("behavior", "quote_stale_seconds", fallback=120)
-
-
-def log_quote_ref(group, k, quote_id):
-    """记一笔模型报的编号，线上才分得清「没写标记」和「写了指向最新」。"""
-    if k is None:
-        return
-    if quote_id:
-        rows = LAST_REFS.get(group, [])
-        who = rows[k - 1][1] if 0 < k <= len(rows) else "?"
-        log.info("引用：模型指定 #%d（%s）group=%s", k, who, group[:8])
-    else:
-        log.info("引用：模型写了 #%d（最新/越界），不引 group=%s", k, group[:8])
 
 
 def quote_for_addressed(group, message) -> str | None:
@@ -902,8 +808,7 @@ def meme_budget_hint(group: str) -> str:
         return "你最近两条回复都用了梗，这一轮收住，别再用梗，正常接话。"
     if used:
         return "你最近刚用过一次梗，这一轮不是特别合适就别再用。"
-    return ("梗从眼前长最稳：对方刚说的词、刚发生的事。旧事也能接，但要有钩子——"
-            "他这轮提到相关的词，你能一句话把现在和过去连上；没钩子就别硬拐。")
+    return "这一轮如果语境合适，可以自然带一个梗；不合适就别硬塞。"
 
 
 def group_allows_proactive(group: str) -> bool:
@@ -920,12 +825,6 @@ def group_allows_proactive(group: str) -> bool:
     try:
         if CLIENT is not None and CLIENT.public.get_group_send_with_mention(group):
             return False
-    except qqexc.ModuleError as exc:
-        # 库写错：报给用户，但别因为查不到就把这个群静音
-        try:
-            asyncio.create_task(report_module_error(exc, f"group_allows_proactive {group[:8]}"))
-        except RuntimeError:
-            log.error("botsns 库错误（group_allows_proactive %s）: %s", group[:8], exc)
     except Exception:
         pass
     return True
@@ -939,7 +838,7 @@ def bubble_hint(group: str) -> str:
     if len(hist) >= 4 and all(n <= 1 for n in hist):
         return "你最近四条都是一条，这轮如果能自然分成「反应 + 补充」，就用 <🦄发送> 分两条；别硬拆。"
     if sum(1 for n in hist if n >= 2) >= 3:
-        return "你最近分条有点多，这轮尽量一条说完；能一条就一条，写成两条了也照发，不用回头改。"
+        return "你最近分条有点多，这轮能一条说完就一条。"
     return "普通闲聊大约一半适合分两条；这轮看情况，别硬拆。"
 
 
@@ -1003,7 +902,7 @@ def other_group_context(group: str, instruction: str, fresh) -> str:
         for author, content, ts, is_bot in rows[-4:]:
             name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else (author or "某人")
             clock = datetime.fromtimestamp(ts).strftime("%H:%M")
-            lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 120)}")
+            lines.append(f"[{clock}] {name}: {(content or '').strip()[:120]}")
         parts.append(f"[群{g[:8]}]\n" + "\n".join(lines))
     if not parts:
         return ""
@@ -1027,121 +926,8 @@ def cut_status_block(group: str) -> str:
             f"剩余 {total - sent} 条没发；不要把没发的部分当成已经说过。\n\n")
 
 
-def clip_for_prompt(text: str, limit: int) -> str:
-    """把消息截到 limit 字；被截了就注明还剩多少，别让模型以为话说完了。"""
-    text = (text or "").strip()
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}…（内容过长已截断，剩 {len(text) - limit} 字）"
-
-
-# ---------------- 人物记忆 / 状态 ----------------
-
-MOOD_KEY = "self:mood"
-FED_WORDS = ("投喂", "鱼食", "小鱼干", "喂鱼", "喂你")
-GRUMPY_WORDS = ("笨", "傻", "滚蛋", "滚开", "滚吧", "闭嘴", "烦死", "没用", "废物")
-
-
-def people_block(group: str, who: str = "", fresh=None) -> str:
-    """把「刚 @ 我的人」和「最后说话的人」的小档案注入提示词。
-
-    只给 1-2 个：全铺开就成了花名册。没画像的人不占位。
-    """
-    if MEMORY is None:
-        return ""
-    names: list[str] = []
-    if who:
-        names.append(who)
-    if fresh:
-        for author, _c, _ts, is_bot in reversed(fresh):
-            if not is_bot and author and author not in names:
-                names.append(author)
-                break
-    lines = []
-    for name in names[:2]:
-        row = MEMORY.person_by_name(name)
-        if not row:
-            continue
-        _openid, _name, note, _note_ts, last_ts, _msg_count = row
-        if not (note or "").strip():
-            continue
-        freshness = "（最近很活跃）" if time.time() - (last_ts or 0) < 86400 else ""
-        lines.append(f"- {name}：{note.strip()}{freshness}")
-    if not lines:
-        return ""
-    return (
-        "你认识的群友（之前的印象，参考就好；别复述、别表现得像在查档案）：\n"
-        + "\n".join(lines) + "\n\n"
-    )
-
-
-def _mood_state() -> dict:
-    raw = MEMORY.get_state(MOOD_KEY) if MEMORY is not None else None
-    try:
-        data = json.loads(raw) if raw else {}
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_mood(st: dict):
-    try:
-        MEMORY.set_state(MOOD_KEY, json.dumps(st, ensure_ascii=False))
-    except Exception:
-        log.exception("保存心情失败")
-
-
-def bump_mood(text: str):
-    """喂食/被怼触发心情。只认很明确的词，别乱触发（"吃了吗"不算法）。"""
-    if MEMORY is None:
-        return
-    text = text or ""
-    st = _mood_state()
-    now = time.time()
-    if any(w in text for w in FED_WORDS):
-        st["fed_ts"] = now
-        st["fed_count"] = int(st.get("fed_count", 0) or 0) + 1
-        st["grumpy_until"] = 0
-        _save_mood(st)
-    elif any(w in text for w in GRUMPY_WORDS):
-        st["grumpy_until"] = now + 300
-        _save_mood(st)
-
-
-def mood_line() -> str:
-    """当前状态：饿/困由时间推，记仇/被喂由事件存。克制注入。"""
-    if MEMORY is None:
-        return ""
-    if not CONFIG.getboolean("behavior", "mood_enabled", fallback=True):
-        return ""
-    st = _mood_state()
-    now = time.time()
-    fed_ts = float(st.get("fed_ts") or 0) or (now - 5 * 3600)
-    hunger = min(100.0, max(0.0, (now - fed_ts) / 3600) * 4.0)
-    hour = datetime.now().hour
-    energy = 30 if 2 <= hour < 7 else (55 if 7 <= hour < 9 else 75)
-    grumpy = float(st.get("grumpy_until") or 0) > now
-
-    bits = []
-    if grumpy:
-        bits.append("有点记仇，还没消气")
-    if hunger >= 70:
-        bits.append("很饿")
-    elif hunger >= 40:
-        bits.append("有点饿")
-    if energy <= 35:
-        bits.append("很困")
-    if not bits:
-        return ""
-    return (
-        "你此刻的状态（只是你自己的感觉，不是要汇报的事）：" + "、".join(bits) + "。"
-        "只有在自然相关时（有人问你在干嘛、说到吃饭/睡觉、或者正好接得上）才可以带一句；"
-        "不要每句都提，不要主动宣布「我饿了」，更不要把它当万能答案。\n\n"
-    )
-
-
 def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
-                     fresh=None, refs_enabled: bool = True) -> str:
+                     fresh=None) -> str:
     """把增量转录 + 本次任务指令拼成提示词。"""
     if fresh is None:
         fresh = _fresh_rows(group)
@@ -1160,22 +946,14 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     for author, content, ts, is_bot in fresh:
         clock = datetime.fromtimestamp(ts).strftime("%H:%M")
         name = CONFIG.get("bot", "name", fallback="DSH") if is_bot else author
-        lines.append(f"[{clock}] {name}: {clip_for_prompt(content, 200)}")
+        lines.append(f"[{clock}] {name}: {(content or '').strip()[:200]}")
 
     head = ("以下是群里刚才的消息：\n" + "\n".join(lines)) if lines else "这一批没有新消息。"
-
-    # 引用编号：模型知道自己在回谁，比自己猜（按名字/最近一条）准得多。
-    # 暖场/私信没有"在回谁"这回事，refs_enabled=False 就不给编号。
-    refs = MEMORY.recent_external(group, SELF_NAMES, limit=8) if refs_enabled else []
-    LAST_REFS[group] = refs
-    ref_block = refs_block(refs)
     cross_block = other_group_context(group, instruction, fresh)
     cut_block = cut_status_block(group)
     summ = _ctx_state(group, "ctxsum").strip()
     sum_block = (
-        "更早的对话摘要（已压缩，只用来懂背景；这轮的谈资以对方刚说的为准）：\n"
-        + summ
-        + "\n（旧事要接，得等对方这轮露出钩子；没钩子就别说。旧任务只能拿来打自己的脸，别拿去催他。）\n\n"
+        "更早的对话摘要（已压缩，参考就好，不要主动复述）：\n" + summ + "\n\n"
     ) if summ else ""
     mem = MEMORY.recent_memories(group, limit=8)
     mem_block = ""
@@ -1185,15 +963,12 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
             for ts, _kind, text in mem
         ]
         mem_block = (
-            "群内记忆（过去的事，只用来懂背景；这轮的谈资以对方刚说的为准）：\n"
-            + "\n".join(mem_lines)
-            + "\n（同上：旧事不是不能提，得顺着对方这轮的话提；事没办完也别催。）\n\n"
+            "群内记忆（之前发生的事，参考就好，不要主动复述）：\n"
+            + "\n".join(mem_lines) + "\n\n"
         )
-    people_blk = people_block(group, who, fresh)
-    mood_blk = mood_line()
     if group_allows_proactive(group):
         split_line = (
-            "只输出要发到群里的话本身；能一条就一条，自然停顿处想分就写 <🦄发送> 分两条；"
+            "只输出要发到群里的话本身；默认一条，想在自然停顿处分条就写 <🦄发送>；"
             "决定不说话就只输出 SKIP。\n"
         )
     else:
@@ -1210,16 +985,10 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
         "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
-    if ref_block:
-        tail += (
-            "\n回复最前面必须写 [[引:#编号]]，标明你在接上面列表里的哪一条；"
-            "写错或漏写就会引错人。这个编号只指群消息，跟网页来源无关，"
-            "群聊里不用贴链接、也不用交代来源。"
-        )
     lib = image_library_hint()
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{people_blk}{mood_blk}{head}\n\n{ref_block}{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
@@ -1385,15 +1154,14 @@ def last_spoke_hint(group: str) -> str:
 
 
 async def ask_dsh(group: str, instruction: str, who: str = "", message=None,
-                  with_images: bool = False, quote_refs: bool = True) -> str | None:
+                  with_images: bool = False) -> str | None:
     """所有"要不要说话、说什么"都问 DSH。返回 None 表示这次不说话。"""
     if BRIDGE is None:
         return None
     key = f"sid:{group}"
     await maybe_compact(group)   # 窗口到 50 条先压成摘要，再取本轮增量
     fresh = _fresh_rows(group)
-    prompt = build_dsh_prompt(group, instruction, who, message, fresh=fresh,
-                             refs_enabled=quote_refs)
+    prompt = build_dsh_prompt(group, instruction, who, message, fresh=fresh)
     images = collect_prompt_images(fresh) if with_images else []
     try:
         text = await BRIDGE.prompt(
@@ -1443,14 +1211,6 @@ HEARTBEAT_INSTRUCTION = (
     "不要播报新闻，不要解释材料从哪来。"
     "只发一句，不要自问自答，不要一次发好几条，不要问「在吗」「有人吗」。"
     "由头跟群里最近聊的对不上，宁可输出 SKIP。"
-)
-
-EVENT_INSTRUCTION = (
-    "群里正好安静。你刚碰到一件事，想随口提一句："
-    "找一个像「刚注意到」的说法，不要像播报，不要解释你怎么知道的，"
-    "不要说「系统监测到」「检测到」「本机」这种词。"
-    "只发一句；对方没接就让它过去，不要追问。"
-    "由头跟群里最近的聊天完全接不上，宁可输出 SKIP。"
 )
 
 
@@ -1512,139 +1272,6 @@ async def memory_loop():
         await asyncio.sleep(SUMMARY_INTERVAL)
 
 
-# ---------------- 人物画像（离线，低频） ----------------
-
-PEOPLE_INTERVAL = 7200
-PEOPLE_MIN_MESSAGES = 6
-PEOPLE_STALE_HOURS = 24
-PEOPLE_MAX_PER_ROUND = 2
-
-
-async def summarize_person(openid: str, name: str) -> str | None:
-    """给一个人提炼一句印象；失败返回 None，不推进 note_ts，下轮再试。"""
-    if BRAIN is None:
-        return None
-    rows = MEMORY.person_messages(openid, limit=25, days=7)
-    if len(rows) < 3:
-        return None
-    lines = []
-    for _g, _a, content, ts in rows:
-        clock = datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
-        lines.append(f"[{clock}] {(content or '').strip()[:120]}")
-    system = (
-        "你在给群友记小档案。根据这个人最近在群里说的话，写一句印象："
-        "他是什么样的人、说话什么风格、最近在关心什么。只写一句，不超过 40 字；"
-        "只写你确实从话里看出来的，不确定就只输出 NONE。"
-        "不要评价外貌，不要编造，不要 Markdown。"
-    )
-    try:
-        text = await BRAIN.complete(
-            system, f"群友：{name}\n最近的话：\n" + "\n".join(lines),
-            temperature=0.3, max_tokens=120, enable_thinking=False,
-        )
-    except Exception:
-        log.exception("人物画像调用失败 %s", name)
-        return None
-    note = (text or "").strip().splitlines()[0].strip() if text else ""
-    if not note or note.upper() == "NONE":
-        return None
-    return note[:120]
-
-
-async def people_loop():
-    await asyncio.sleep(20)
-    while True:
-        try:
-            due = MEMORY.people_needing_note(
-                min_messages=PEOPLE_MIN_MESSAGES,
-                stale_hours=PEOPLE_STALE_HOURS,
-                limit=PEOPLE_MAX_PER_ROUND,
-            )
-            for openid, name, _count, _note_ts in due:
-                note = await summarize_person(openid, name or "某人")
-                if note:
-                    MEMORY.set_person_note(openid, note)
-                    log.info("人物画像 %s: %s", name, note[:50])
-        except Exception:
-            log.exception("人物画像循环出错")
-        await asyncio.sleep(PEOPLE_INTERVAL)
-
-
-# ---------------- 自我复盘（纯规则，不烧 LLM） ----------------
-
-REVIEW_INTERVAL = 6 * 3600
-REVIEW_WINDOW_HOURS = 24
-REVIEW_REPLY_WINDOW = 15 * 60
-
-
-def _reply_kind(text: str) -> str:
-    t = (text or "").strip()
-    if any(k in t for k in ("?", "？", "吗", "怎么", "为什么", "谁", "哪")):
-        return "question"
-    if len(t) <= 6:
-        return "short"
-    if len(t) >= 40:
-        return "long"
-    return "normal"
-
-
-async def build_review(group: str) -> dict | None:
-    """过去 24h：自己说了什么、哪条被接、哪条冷场。给调风格当数据。"""
-    since = time.time() - REVIEW_WINDOW_HOURS * 3600
-    rows = MEMORY.bot_messages_since(group, since)
-    if not rows:
-        return None
-    items = []
-    replied = 0
-    for mid, content, ts in rows:
-        nxt = MEMORY.next_message_between(group, mid, ts + REVIEW_REPLY_WINDOW)
-        got = bool(nxt) and not (nxt[2] and (nxt[3] or "") in SELF_NAMES)
-        if got:
-            replied += 1
-        items.append({
-            "t": datetime.fromtimestamp(ts).strftime("%H:%M"),
-            "kind": _reply_kind(content),
-            "text": (content or "")[:80],
-            "replied": got,
-            "reaction": (nxt[0][:60] if got and nxt[0] else ""),
-        })
-    total = len(items)
-    kinds: dict[str, dict] = {}
-    for it in items:
-        d = kinds.setdefault(it["kind"], {"n": 0, "hit": 0})
-        d["n"] += 1
-        d["hit"] += 1 if it["replied"] else 0
-    data = {
-        "window_h": REVIEW_WINDOW_HOURS,
-        "sent": total,
-        "replied": replied,
-        "replied_pct": round(replied * 100 / total) if total else 0,
-        "cold": total - replied,
-        "items": items[-40:],
-        "by_kind": {
-            k: {"n": d["n"], "hit": d["hit"],
-                "pct": round(d["hit"] * 100 / d["n"]) if d["n"] else 0}
-            for k, d in kinds.items()
-        },
-    }
-    MEMORY.add_review(group, datetime.now().strftime("%Y-%m-%d"), data)
-    return data
-
-
-async def review_loop():
-    await asyncio.sleep(90)
-    while True:
-        try:
-            for group in MEMORY.known_groups():
-                data = await build_review(group)
-                if data:
-                    log.info("复盘 %s: 发 %d 条，被接 %d 条（%d%%）",
-                             group[:8], data["sent"], data["replied"], data["replied_pct"])
-        except Exception:
-            log.exception("复盘循环出错")
-        await asyncio.sleep(REVIEW_INTERVAL)
-
-
 def _warm_state(group: str) -> dict:
     raw = MEMORY.get_state(f"warm:{group}")
     if not raw:
@@ -1684,13 +1311,7 @@ async def _maybe_warmup(group: str):
     silent = CONFIG.getint("behavior", "warmup_silent", fallback=86400)
 
     last_act = MEMORY.last_activity(group)
-    # 有事件（磁盘满/负载高/时间节点）时不必等到冷场 30 分钟，安静 10 分钟就能说
-    event = events.collect(MEMORY)
-    need_idle = (
-        CONFIG.getint("behavior", "warmup_event_idle", fallback=600)
-        if event else idle
-    )
-    if now - last_act < need_idle:
+    if now - last_act < idle:
         return                       # 还有人在说话，不用暖
     if now - last_act > alive:
         return                       # 太久没人，说了也没人看
@@ -1728,22 +1349,17 @@ async def _maybe_warmup(group: str):
         _save_warm_state(group, st)
         return
 
-    if event:
-        events.mark(MEMORY, event)
-        log.info("事件触发[%s]：%s group=%s", event["kind"], event["text"], group[:8])
-        instruction = (EVENT_INSTRUCTION + last_spoke_hint(group)
-                       + f"\n\n你刚注意到的事：\n{event['text']}")
-    else:
-        stuff = await material.collect(group, MEMORY)
-        if not stuff:
-            log.info("暖场：没有合格由头，跳过 group=%s", group[:8])
-            st["last_ts"] = now - cooldown + 1800
-            _save_warm_state(group, st)
-            return
-        instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
-                       + f"\n\n手上的由头：\n{stuff}")
+    stuff = await material.collect(group, MEMORY)
+    if not stuff:
+        log.info("暖场：没有合格由头，跳过 group=%s", group[:8])
+        st["last_ts"] = now - cooldown + 1800
+        _save_warm_state(group, st)
+        return
+
+    instruction = (HEARTBEAT_INSTRUCTION + last_spoke_hint(group)
+                   + f"\n\n手上的由头：\n{stuff}")
     cut_id = MEMORY.max_id(group)
-    text = await ask_dsh(group, instruction, quote_refs=False)
+    text = await ask_dsh(group, instruction)
     if not text:
         st["last_ts"] = now - cooldown + 1800
         _save_warm_state(group, st)
@@ -1831,11 +1447,7 @@ async def main():
         BASE_DIR / "persona.md",
     )
 
-    try:
-        CLIENT = QQClient(appid, appsecret, host, port, Callbacks())
-    except qqexc.ModuleError as exc:
-        await report_module_error(exc, "QQClient() 构造")
-        raise
+    CLIENT = QQClient(appid, appsecret, host, port, Callbacks())
 
     send_token = CONFIG.get("send", "token", fallback="").strip()
 
@@ -1853,16 +1465,11 @@ async def main():
             row = await resolve_image(image)   # 8 位哈希精确找，否则按描述匹配
             if not row:
                 return {"ok": False, "error": "image not found"}
-            try:
-                ok = await media.upload_and_send(
-                    CLIENT, group, Path(row[0]),
-                    base_url=CONFIG.get("bot", "image_base", fallback=""),
-                    public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
-                )
-            except qqexc.ModuleError as exc:
-                await report_module_error(exc, "send_api image")
-                return {"ok": False, "error": "botsns 库错误（详见日志/私信）",
-                        "err_code": getattr(exc, "err_code", None)}
+            ok = await media.upload_and_send(
+                CLIENT, group, Path(row[0]),
+                base_url=CONFIG.get("bot", "image_base", fallback=""),
+                public_dir=Path(CONFIG.get("bot", "image_public_dir", fallback="/var/www/images")),
+            )
             return {"ok": ok, "sent": "image", "desc": row[1]}
         if not group or not text:
             return {"ok": False, "error": "group and text required"}
@@ -1882,10 +1489,6 @@ async def main():
             return {"ok": False, "error": "openid and text required"}
         try:
             await CLIENT.dc.send_message(openid, text)
-        except qqexc.ModuleError as exc:
-            await report_module_error(exc, "send_dc_api")
-            return {"ok": False, "error": "botsns 库错误（详见日志/私信）",
-                    "err_code": getattr(exc, "err_code", None)}
         except Exception as exc:
             log.exception("私信发送失败")
             return {"ok": False, "error": str(exc)}
@@ -1987,31 +1590,15 @@ async def main():
         else:
             instruction = ("没人 @ 你。能接就接，别太保守；只有完全无关、"
                            "或者说了只会显得多余，才输出 SKIP。")
-        instruction = (body.get("instruction") or "").strip() or instruction
-        # 传 group 就用那个群的最近消息当上下文，能在本地验证「#编号/引用」是否对上；
-        # 不传则只喂 text 一条，跟以前一样。
-        group = (body.get("group") or "").strip()
-        if group:
-            fresh = MEMORY.recent_messages(
-                group, minutes=int(body.get("minutes") or 60), limit=10
-            )
-            if not fresh:
-                return {"ok": False, "error": "no messages in that group"}
-        else:
-            group = "debug:persona"
-            fresh = [("深海渔民", text, time.time(), False)]
-        prompt = build_dsh_prompt(group, instruction, fresh=fresh)
+        prompt = build_dsh_prompt(
+            "debug:persona", instruction,
+            fresh=[("深海渔民", text, time.time(), False)],
+        )
         try:
             reply = await BRIDGE.prompt("debug:persona", prompt)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
-        clean, quote, qk = take_marker(reply or "", LAST_REFS.get(group, []))
-        out = {"ok": True, "reply": clean, "quote_id": quote, "quote_k": qk,
-               "refs": [(i + 1, a, (c or "")[:20]) for i, (_m, a, c, _t) in
-                        enumerate(LAST_REFS.get(group, []))]}
-        if body.get("show_prompt"):
-            out["prompt"] = prompt
-        return out
+        return {"ok": True, "reply": reply}
 
     @CLIENT.app.app.get("/groups")
     async def groups_api():
@@ -2036,95 +1623,12 @@ async def main():
     async def stats():
         return MEMORY.stats()
 
-    @CLIENT.app.app.get("/review")
-    async def review_api(request: Request):
-        """复盘报告：不发群，给调风格/看数据用。带 group 就只看那个群。"""
-        token = request.headers.get("x-token") or request.query_params.get("token")
-        if not send_token or token != send_token:
-            return {"ok": False, "error": "unauthorized"}
-        group = (request.query_params.get("group") or "").strip()
-        try:
-            days = max(1, min(int(request.query_params.get("days") or 7), 30))
-        except ValueError:
-            days = 7
-        targets = [group] if group else [
-            g for g in MEMORY.known_groups() if not g.startswith("dc:")
-        ]
-        out = {}
-        for g in targets[:5]:
-            rows = MEMORY.latest_reviews(g, limit=days)
-            out[g[:8]] = [{"day": day, **json.loads(raw)} for day, _ts, raw in rows]
-        return {"ok": True, "reviews": out}
-
-    @CLIENT.app.app.get("/people")
-    async def people_api(request: Request):
-        """bot 记了谁、印象是什么；方便核对和纠错。"""
-        token = request.headers.get("x-token") or request.query_params.get("token")
-        if not send_token or token != send_token:
-            return {"ok": False, "error": "unauthorized"}
-        try:
-            limit = max(1, min(int(request.query_params.get("limit") or 30), 100))
-        except ValueError:
-            limit = 30
-        rows = MEMORY.people_overview(limit)
-        return {"ok": True, "people": [
-            {"name": name, "note": note,
-             "last": datetime.fromtimestamp(ts or 0).strftime("%m-%d %H:%M"),
-             "count": count}
-            for name, note, ts, count in rows
-        ]}
-
-    @CLIENT.app.app.get("/context")
-    async def context_api(request: Request):
-        """看下一轮会往模型里塞什么：群记忆 / 人物印象 / 状态 / 待发事件 / 引用候选。
-
-        只读、不调模型、不发群；参数 `group` 不传就用最近 24h 最活跃的群。
-        """
-        token = request.headers.get("x-token") or request.query_params.get("token")
-        if not send_token or token != send_token:
-            return {"ok": False, "error": "unauthorized"}
-        group = (request.query_params.get("group") or "").strip()
-        if not group:
-            groups = MEMORY.active_groups(minutes=60 * 24)
-            if not groups:
-                return {"ok": False, "error": "没有活跃群，传 group 指定"}
-            group = groups[0]
-        mem = MEMORY.recent_memories(group, limit=8)
-        refs = MEMORY.recent_external(group, SELF_NAMES, limit=8)
-        who = (request.query_params.get("who") or "").strip()
-        if not who and refs:
-            who = refs[-1][1]
-        ev = events.collect(MEMORY)
-        return {
-            "ok": True,
-            "group": group,
-            "now": datetime.now().strftime("%m-%d %H:%M"),
-            "memories": [
-                {"t": datetime.fromtimestamp(ts).strftime("%m-%d %H:%M"), "text": text}
-                for ts, _kind, text in mem
-            ],
-            "people": people_block(group, who).strip(),
-            "mood": mood_line().strip(),
-            "ctxsum_chars": len(_ctx_state(group, "ctxsum").strip()),
-            "event": ev,
-            "refs": [
-                {"k": i + 1, "author": a, "text": (c or "")[:30]}
-                for i, (_m, a, c, _t) in enumerate(refs)
-            ],
-        }
-
     log.info("DSH Bot 启动 appid=%s %s:%s model=%s", appid, host, port, BRAIN.model)
     asyncio.create_task(start_bridge())
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(memory_loop())
-    asyncio.create_task(people_loop())
-    asyncio.create_task(review_loop())
     asyncio.create_task(housekeeping_loop())
-    try:
-        await CLIENT.run()
-    except qqexc.ModuleError as exc:
-        await report_module_error(exc, "CLIENT.run()")
-        raise
+    await CLIENT.run()
 
 
 if __name__ == "__main__":
