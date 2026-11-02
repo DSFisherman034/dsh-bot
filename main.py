@@ -320,6 +320,7 @@ def schedule_ambient(group):
 
 async def _ambient_round(group):
     debounce = CONFIG.getint("behavior", "ambient_debounce", fallback=10)
+    started = time.time()
     try:
         await asyncio.sleep(debounce)
         reason = ambient_skip_reason(group)
@@ -332,6 +333,11 @@ async def _ambient_round(group):
         text = await ask_dsh(group, ambient_instruction(group))
         if not text:
             log.info("插话跳过[模型决定不说] group=%s", group[:8])
+            return
+        # 这轮等模型的时候，@ 回复可能已经把同一批消息回过了：别再回第二遍。
+        last = MEMORY.last_bot_message(group)
+        if last and last[1] > started:
+            log.info("插话放弃[这轮期间已经回过话] group=%s", group[:8])
             return
 
         await asyncio.sleep(_typing_delay(text))
@@ -844,7 +850,8 @@ def _fresh_rows(group: str) -> list:
     if rows:
         PENDING_SEEN[group] = rows[-1][0]
         return [(author, content, ts, is_bot) for _id, author, content, ts, is_bot in rows]
-    return MEMORY.recent_messages(group, minutes=180, limit=8)
+    # 没有新消息就别回放最近 8 条：那会把已经回过的消息再喂一遍，模型又回一次。
+    return []
 
 
 SELF_NAMES = {"DSH", "大肥鱼", "小鲸鱼", "鱼"}
