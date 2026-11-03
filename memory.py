@@ -61,12 +61,16 @@ class Memory:
         self.conn.commit()
 
     def _migrate(self):
-        """老库补列：图片向量（描述 embedding）+ 适用范围 scope。"""
+        """老库补列：图片向量（描述 embedding）+ 适用范围 scope + 图片类别 kind。"""
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(images)")}
         if "emb" not in cols:
             self.conn.execute("ALTER TABLE images ADD COLUMN emb BLOB")
         if "scope" not in cols:
             self.conn.execute("ALTER TABLE images ADD COLUMN scope TEXT DEFAULT ''")
+        if "kind" not in cols:
+            # 老图 kind 为 NULL：按"表情包"处理（它们都是当初特意收进图库的）；
+            # 新图入库时由视觉模型判定，只有"表情包"进图库。
+            self.conn.execute("ALTER TABLE images ADD COLUMN kind TEXT")
         self.conn.commit()
 
     # ---------- 消息 ----------
@@ -254,16 +258,28 @@ class Memory:
     # ---------- 图片 ----------
 
     def get_image(self, h):
-        row = self.conn.execute("SELECT hash, path, desc FROM images WHERE hash=?", (h,)).fetchone()
+        row = self.conn.execute(
+            "SELECT hash, path, desc, kind FROM images WHERE hash=?", (h,)
+        ).fetchone()
         return row
 
-    def put_image(self, h, path, desc):
+    def put_image(self, h, path, desc, kind="表情包"):
+        """kind：表情包 / 截图 / 广告 / 照片 / 其他；只有"表情包"会进图库。"""
         self.conn.execute(
-            "INSERT INTO images(hash,path,desc,ts) VALUES (?,?,?,?)"
-            " ON CONFLICT(hash) DO UPDATE SET desc=excluded.desc, path=excluded.path",
-            (h, str(path), desc or "", time.time()),
+            "INSERT INTO images(hash,path,desc,kind,ts) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(hash) DO UPDATE SET desc=excluded.desc, path=excluded.path,"
+            " kind=excluded.kind",
+            (h, str(path), desc or "", kind or "表情包", time.time()),
         )
         self.conn.commit()
+
+    def set_image_kind(self, h, kind):
+        self.conn.execute("UPDATE images SET kind=? WHERE hash=?", (kind, h))
+        self.conn.commit()
+
+    def images_for_classify(self):
+        """[(hash, path, kind), ...] 全量，给回填分类用。"""
+        return self.conn.execute("SELECT hash, path, kind FROM images ORDER BY ts").fetchall()
 
     def find_image(self, prefix):
         row = self.conn.execute(
@@ -276,9 +292,10 @@ class Memory:
         self.conn.commit()
 
     def images_with_emb(self):
-        """[(hash, path, desc, emb_bytes_or_None), ...]，按时间正序。"""
+        """[(hash, path, desc, emb_bytes_or_None), ...]，按时间正序；只含表情包。"""
         rows = self.conn.execute(
-            "SELECT hash, path, desc, emb FROM images ORDER BY ts"
+            "SELECT hash, path, desc, emb FROM images"
+            " WHERE kind IS NULL OR kind='表情包' ORDER BY ts"
         ).fetchall()
         return rows
 
@@ -295,9 +312,10 @@ class Memory:
         self.conn.commit()
 
     def image_library(self, limit=20):
-        """[(hash, desc, scope), ...]，有适用范围的排前面，方便模型参考。"""
+        """[(hash, desc, scope), ...]，有适用范围的排前面；只含表情包（不含截图/广告）。"""
         rows = self.conn.execute(
             "SELECT hash, desc, scope FROM images"
+            " WHERE kind IS NULL OR kind='表情包'"
             " ORDER BY CASE WHEN scope IS NULL OR scope='' THEN 1 ELSE 0 END, ts DESC LIMIT ?",
             (limit,),
         ).fetchall()

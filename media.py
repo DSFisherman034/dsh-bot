@@ -25,6 +25,7 @@ import shutil
 import json
 import logging
 import math
+import re
 from array import array
 from pathlib import Path
 
@@ -155,17 +156,54 @@ async def download(url: str, images_dir: Path, timeout: float = 15.0) -> tuple[s
     return h, path
 
 
-async def describe(path: Path, base_url: str, api_key: str, model: str,
-                   limit: int = MAX_DESC, edge: int = DEFAULT_EDGE) -> str:
-    """用多模态模型描述一张图，返回一句短描述。失败返回空串。
+CATEGORIES = ("表情包", "截图", "广告", "照片", "其他")
 
-    先 prepare 成小块再上传：原图直传实测 5MB 图能直接写到写超时，
-    而且慢。关掉 enable_thinking 后同图从 ~12s 降到 ~1s。
+_KIND_RE = re.compile(r"类\s*别\s*[:：]\s*([^\s，,。；;、\n]{1,6})")
+_DESC_RE = re.compile(r"描\s*述\s*[:：]\s*([\s\S]*)")
+
+ANALYZE_PROMPT = (
+    "先给这张图归类，再写一句描述。类别只能选一个：表情包 / 截图 / 广告 / 照片 / 其他。\n"
+    "表情包＝梗图、表情、贴纸、卡通反应图，用来表达情绪；"
+    "截图＝聊天记录、游戏画面、网页、软件界面、通知、报错；"
+    "广告＝推广、二维码、商品图、活动海报；照片＝真实拍摄的人、物、景。\n"
+    "只输出两行，不要解释：\n"
+    "类别：<一个词>\n"
+    "描述：<不超过{limit}个字，写图里最显眼的内容>\n"
+)
+
+
+def parse_analysis(text: str, limit: int = MAX_DESC) -> tuple[str, str]:
+    """从视觉模型回复里拆出 (类别, 描述)；类别不认识就按「其他」处理。"""
+    raw = (text or "").strip()
+    kind = ""
+    m = _KIND_RE.search(raw)
+    if m:
+        kind = m.group(1).strip()
+    if kind not in CATEGORIES:
+        for c in CATEGORIES:
+            if raw.startswith(c):
+                kind = c
+                break
+        else:
+            kind = "其他"
+    m2 = _DESC_RE.search(raw)
+    desc = (m2.group(1) if m2 else raw).strip()
+    desc = " ".join(desc.split())[:limit]
+    return kind, desc
+
+
+async def analyze(path: Path, base_url: str, api_key: str, model: str,
+                  limit: int = MAX_DESC, edge: int = DEFAULT_EDGE) -> tuple[str, str]:
+    """看一张图，返回 (类别, 描述)。失败返回 ("其他", "")。
+
+    类别：表情包 / 截图 / 广告 / 照片 / 其他。只有"表情包"会进图库，
+    其余（游戏截图、广告、照片）只存文件与描述给当轮上下文用。
+    先 prepare 成小块再上传；关掉 enable_thinking 后同图从 ~12s 降到 ~1s。
     """
     got = prepare(path, edge=edge)
     if not got:
-        log.warning("图片描述跳过：准备失败 %s", path)
-        return ""
+        log.warning("图片分析跳过：准备失败 %s", path)
+        return "其他", ""
     mime, data = got
     b64 = base64.b64encode(data).decode()
 
@@ -175,11 +213,11 @@ async def describe(path: Path, base_url: str, api_key: str, model: str,
         "messages": [{
             "role": "user",
             "content": [
-                {"type": "text", "text": f"用不超过{limit}个字描述这张图。只输出描述本身，不要解释。"},
+                {"type": "text", "text": ANALYZE_PROMPT.format(limit=limit)},
                 {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
             ],
         }],
-        "max_tokens": 160,
+        "max_tokens": 220,
     }
 
     # 阿里云/Qwen 兼容端点认 enable_thinking；别的端点不认就退回去重试一次
@@ -192,14 +230,23 @@ async def describe(path: Path, base_url: str, api_key: str, model: str,
                     json={**base_payload, **extra},
                 )
                 if resp.status_code >= 400:
-                    log.warning("图片描述 HTTP %s：%s", resp.status_code, resp.text[:200])
+                    log.warning("图片分析 HTTP %s：%s", resp.status_code, resp.text[:200])
                     raise httpx.HTTPStatusError("bad status", request=resp.request, response=resp)
                 msg = resp.json()["choices"][0]["message"]
                 text = msg.get("content") or msg.get("reasoning_content") or ""
-            return " ".join(text.split())[:limit]
+            kind, desc = parse_analysis(text, limit)
+            log.info("图片类别=%s 描述=%s", kind, desc[:30])
+            return kind, desc
         except Exception as exc:
-            log.warning("图片描述失败（%s）：%r", "enable_thinking" if extra else "plain", exc)
-    return ""
+            log.warning("图片分析失败（%s）：%r", "enable_thinking" if extra else "plain", exc)
+    return "其他", ""
+
+
+async def describe(path: Path, base_url: str, api_key: str, model: str,
+                   limit: int = MAX_DESC, edge: int = DEFAULT_EDGE) -> str:
+    """只要描述（兼容旧调用）；分类走 analyze()。"""
+    _kind, desc = await analyze(path, base_url, api_key, model, limit=limit, edge=edge)
+    return desc
 
 
 # ---------------- 图片检索（按描述找图） ----------------

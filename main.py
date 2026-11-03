@@ -135,8 +135,10 @@ async def enrich_attachments(message, content: str) -> str:
         row = MEMORY.get_image(h)
         if row and row[2]:
             desc = row[2]            # 同一张图只描述一次，省 token
+            kind = (row[3] if len(row) > 3 else None) or "表情包"   # 老图按表情包算
         else:
-            desc = await media.describe(
+            # 先分类再入库：只有"表情包"进图库，截图/广告/照片只留文件和描述给当轮上下文
+            kind, desc = await media.analyze(
                 path,
                 CONFIG.get("ai", "base_url").strip(),
                 CONFIG.get("ai", "api_key").strip(),
@@ -144,10 +146,12 @@ async def enrich_attachments(message, content: str) -> str:
                 limit=CONFIG.getint("ai", "vision_desc_chars", fallback=media.MAX_DESC),
                 edge=CONFIG.getint("ai", "image_max_edge", fallback=media.DEFAULT_EDGE),
             )
-            MEMORY.put_image(h, path, desc)
-            if desc:
+            MEMORY.put_image(h, path, desc, kind)
+            if kind == "表情包" and desc:
                 # 向量后台算，别把消息入库卡住
                 asyncio.create_task(store_embedding(h, desc))
+            else:
+                log.info("图片不入表情包库（%s）：%s", kind, (desc or "")[:40])
         short = h[:8]
         marks.append(f"[图:{desc}|h={short}]" if desc else f"[图|h={short}]")
     if not marks:
