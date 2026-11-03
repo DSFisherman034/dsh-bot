@@ -36,7 +36,7 @@ import material  # noqa: E402
 import media  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
 from memory import Memory  # noqa: E402
-from textfix import strip_meta_leak  # noqa: E402
+from textfix import strip_meta_leak, strip_sources  # noqa: E402
 
 BASE_DIR = Path(__file__).resolve().parent
 IMAGES_DIR = BASE_DIR / "images"
@@ -299,6 +299,11 @@ async def handle_dc(message):
         text, leaked = strip_meta_leak(text)   # 2026-10-31 思考溢出兜底
         if leaked:
             log.warning("私信回复带自我修改，已截到最终那句: %r", text[:80])
+            if not text:
+                return
+        text, had_src = strip_sources(text)   # 2026-11-03 私聊也不带来源/链接
+        if had_src:
+            log.info("私信剥掉搜索来源 %s: %r", who[:8], text[:60])
             if not text:
                 return
         await asyncio.sleep(_typing_delay(text))
@@ -584,6 +589,9 @@ async def _confirm_continue(group, since_id, remaining, sent_count):
 
 async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> bool:
     """返回是否至少发出了一条；同群发送串行，中途被追问会停掉剩余气泡。"""
+    text, had_src = strip_sources(text)   # 2026-11-03 群聊不带搜索来源/链接
+    if had_src:
+        log.info("剥掉搜索来源 group=%s: %r", group[:8], (text or "")[:60])
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
     if not group_allows_proactive(group):
@@ -1574,6 +1582,11 @@ async def main():
         text = (body.get("text") or "").strip()
         if not openid or not text:
             return {"ok": False, "error": "openid and text required"}
+        text, had_src = strip_sources(text)   # 2026-11-03 私信也不带来源/链接
+        if had_src:
+            log.info("出站私信剥掉搜索来源 %s: %r", openid[:8], text[:60])
+            if not text:
+                return {"ok": False, "error": "only sources, nothing to send"}
         try:
             await CLIENT.dc.send_message(openid, text)
         except qqexc.ModuleError as exc:
