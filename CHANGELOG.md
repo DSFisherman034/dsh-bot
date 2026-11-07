@@ -748,3 +748,24 @@
 - 单测 `reference/source_strip_check.py`（13 条全过，含 20:39 那条原文）；`meta_leak_check` 7/7 不回归。
 - 实测 `/debug_reply` 两次（一次触发 web_search）：回复无链接、无「来源/参考」字样。
 - 改代码，已 install + restart（20:43）。顺带把 `textfix.py` 补进 README 的 install 列表（之前漏了）。
+
+## 2026-11-07 · v0.67 图库别只露一半：全列 + 最近发过的标 ★
+
+- 起因：群里吐槽「怎么翻来翻去就这几个表情包，多生成点新的」。查下来不是模型懒：
+  - `image_library_hint(limit=12)` + `image_library()` 的 `ORDER BY scope空后 ts DESC`，
+    **24 张大肥鱼里只有最后导入的 12 张进过提示词**；另外 12 张（得意/干饭/气鼓鼓/疑惑/吓到/晕/
+    比心/害羞/花痴/睡觉/早上好/摸鱼）一次都没出现在 prompt 里，自然一次都没发过。
+  - 晾在外面的 12 张偏「嫌弃/无语/拒绝/思考」，正好对嘴硬人设；没有防重复——
+    日志 166 次群发图里，侧目嫌弃 32、无语死鱼 31、托腮思考 24、双手交叉 17，四张占 63%。
+  - bot 发图不写 `messages`（只有文字走 `_record_own`），模型连"我上一张发了啥"都看不到。
+- 改法（只动图库提示词与记账，不碰人设/语气）：
+  - `format_image_library()` 纯函数：只列有 scope 的图（现在 25 条），格式压成
+    `- [分类] 描述`（原来 `描述｜scope 原文` 截断），总长度反而从 ~1100 字降到 ~700 字；
+  - `image_library_hint(group)` 传群，`recent_images()` 从 state `imgrec:<群>` 读最近 8 张，
+    在行尾标 ★，块头写「★ 是最近刚发过的，这轮换一张」；
+  - `mark_image_sent()` 在 `send_group` 发图成功、`/send` 发图成功两处记账（state 里留 8 个）；
+    重启不丢。
+  - 图库里 36 张没 scope 的（群友随手发的截图/杂图）仍不进清单，只能靠 `[[img-search:]]` 搜到。
+- 单测 `reference/image_library_check.py` 4/4（格式、空 scope 过滤、无分类、★ 只标最近）。
+- 效果预演：24 张全部可见（加 `fef45aa9` 熟人互损图共 25 行）；发过的图下一轮带 ★。
+- 改代码，需要 restart。

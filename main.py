@@ -629,6 +629,7 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
                             sent_count += 1
                             sent_image = True
                             MEMORY.mark_bot_spoke(group)
+                            mark_image_sent(group, Path(row[0]))
                             log.info("群发图 %s: %s", group[:8], row[1][:30])
                         else:
                             log.warning("群发图失败 %s: %s", group[:8], row[1][:30])
@@ -932,18 +933,64 @@ def image_hint(group: str) -> str:
             "选图前先看适用范围，别把嘲讽/互损图用在严肃、安慰或自己被调侃的场合。")
 
 
-def image_library_hint(limit=12) -> str:
-    """把图库描述 + 适用范围给模型，作为选图与改范围的依据。"""
-    rows = MEMORY.image_library(limit)
+IMAGE_KIND_RE = re.compile(r"分类=([^｜|\s]+)")
+
+
+def _image_tag(scope: str) -> str:
+    m = IMAGE_KIND_RE.search(scope or "")
+    return f"[{m.group(1)}] " if m else ""
+
+
+def format_image_library(rows, recent=()) -> str:
+    """图库 → 提示词块（纯函数，便于单测）。rows: [(hash, desc, scope)]。"""
+    rows = [r for r in rows if (r[2] or "").strip()]
     if not rows:
         return ""
-    lines = [
-        f"- {(desc or '').strip()[:56]}｜{(scope or '通用').strip()[:40]}"
-        for _h, desc, scope in rows
-    ]
-    return ("图库（选图前先看适用范围；嘲讽/互损图只在朋友互损时用，"
-            "不用于自己被调侃、严肃、安慰、陌生人；想按情绪/场景找更多，用 [[img-search:描述]]）：\n"
+    recent = set(recent or ())
+    lines = []
+    for h, desc, scope in rows:
+        star = " ★" if h[:8] in recent else ""
+        lines.append(f"- {_image_tag(scope)}{(desc or '').strip()[:44]}{star}")
+    return ("图库（选一张最贴的；★ 是最近刚发过的，这轮换一张；"
+            "嘲讽/互损图只在朋友互损时用，不用于自己被调侃、严肃、安慰、陌生人；"
+            "想按情绪/场景找更多，用 [[img-search:描述]]）：\n"
             + "\n".join(lines))
+
+
+def recent_images(group: str, keep: int = 8) -> list:
+    """这个群最近发过的图（hash 前 8 位），从 state 读，重启不丢。"""
+    raw = MEMORY.get_state(f"imgrec:{group}") or "[]"
+    try:
+        vals = json.loads(raw)
+        return [str(x) for x in vals][-keep:]
+    except Exception:
+        return []
+
+
+def mark_image_sent(group: str, path) -> None:
+    """记下刚发过的图，下一轮提示词里标 ★，让模型换一张。"""
+    try:
+        row = MEMORY.image_by_path(path)
+        if not row:
+            return
+        short = row[0][:8]
+        rec = [x for x in recent_images(group, keep=20) if x != short]
+        rec.append(short)
+        MEMORY.set_state(f"imgrec:{group}", json.dumps(rec[-8:], ensure_ascii=False))
+    except Exception:
+        log.warning("记录发过的图失败 group=%s", group[:8], exc_info=True)
+
+
+def image_library_hint(group: str = "", limit=40) -> str:
+    """把图库描述 + 适用范围给模型，作为选图与改范围的依据。
+
+    只列有 scope 的图（自己标过来源/画风的）。limit 要给够：2026-11-07 之前是
+    limit=12 + ts DESC，只有最后导入的 12 张能进提示词，另一半（开心/日常）
+    永远发不出来，群里才会「翻来覆去就这几张」。
+    """
+    rows = MEMORY.image_library(limit)
+    recent = recent_images(group) if group else ()
+    return format_image_library(rows, recent)
 
 
 OTHER_GROUP_HINTS = ("另一个群", "其他群", "别的群", "那个群", "新群", "二群",
@@ -1071,7 +1118,7 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
         "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
-    lib = image_library_hint()
+    lib = image_library_hint(group)
     lib_block = (lib + "\n\n") if lib else ""
     return (
         f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
@@ -1565,6 +1612,8 @@ async def main():
                 await report_module_error(exc, "send_api image")
                 return {"ok": False, "error": "botsns 库错误（详见日志/私信）",
                         "err_code": getattr(exc, "err_code", None)}
+            if ok:
+                mark_image_sent(group, Path(row[0]))
             return {"ok": ok, "sent": "image", "desc": row[1]}
         if not group or not text:
             return {"ok": False, "error": "group and text required"}
