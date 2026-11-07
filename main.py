@@ -592,6 +592,9 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
     text, had_src = strip_sources(text)   # 2026-11-03 群聊不带搜索来源/链接
     if had_src:
         log.info("剥掉搜索来源 group=%s: %r", group[:8], (text or "")[:60])
+    searches = IMG_SEARCH_RE.findall(text or "")
+    if searches:
+        log.info("模型用了 img-search %d 次：%r", len(searches), searches[:3])
     text = IMG_SEARCH_RE.sub(lambda m: f"[[img:{m.group(1)}]]", text or "")
     text = await apply_image_scopes(text)
     if not group_allows_proactive(group):
@@ -618,7 +621,7 @@ async def send_group(group, text, msg_id=None, quote_id=None, since_id=None) -> 
             try:
                 m = IMG_MARKER.search(part)
                 if m:
-                    row = await resolve_image(m.group(1))
+                    row = await resolve_image(m.group(1), exclude=recent_images(group))
                     if row:
                         ok_img = await media.upload_and_send(
                             CLIENT, group, Path(row[0]), msg_id=msg_id,
@@ -925,36 +928,13 @@ def image_hint(group: str) -> str:
     """把配图比例往 1/3 左右推：太久没配就提醒，太密就压。"""
     hist = LAST_IMAGES.get(group, [])[-4:]
     if len(hist) >= 4 and sum(hist) == 0:
-        return ("你最近四条都没配图，这轮如果图能加分，就配一张（[[img:描述]]）；别硬配。"
-                "选图前先看适用范围，嘲讽/互损图别用在严肃、安慰或自己被调侃的场合。")
+        return ("你最近四条都没配图，这轮如果图能加分，就配一张"
+                "（[[img-search:当下的情绪或场景]]）；别硬配。"
+                "配图前想一下场合：嘲讽/互损的图别用在严肃、安慰或自己被调侃的时候。")
     if sum(hist[-3:]) >= 2:
         return "你最近配图有点多，这轮别配，先说话。"
     return ("大约每 3 条回复可以配一张图；有合适的就配，没有别硬找。"
-            "选图前先看适用范围，别把嘲讽/互损图用在严肃、安慰或自己被调侃的场合。")
-
-
-IMAGE_KIND_RE = re.compile(r"分类=([^｜|\s]+)")
-
-
-def _image_tag(scope: str) -> str:
-    m = IMAGE_KIND_RE.search(scope or "")
-    return f"[{m.group(1)}] " if m else ""
-
-
-def format_image_library(rows, recent=()) -> str:
-    """图库 → 提示词块（纯函数，便于单测）。rows: [(hash, desc, scope)]。"""
-    rows = [r for r in rows if (r[2] or "").strip()]
-    if not rows:
-        return ""
-    recent = set(recent or ())
-    lines = []
-    for h, desc, scope in rows:
-        star = " ★" if h[:8] in recent else ""
-        lines.append(f"- {_image_tag(scope)}{(desc or '').strip()[:44]}{star}")
-    return ("图库（选一张最贴的；★ 是最近刚发过的，这轮换一张；"
-            "嘲讽/互损图只在朋友互损时用，不用于自己被调侃、严肃、安慰、陌生人；"
-            "想按情绪/场景找更多，用 [[img-search:描述]]）：\n"
-            + "\n".join(lines))
+            "配图前想一下场合：嘲讽/互损的图别用在严肃、安慰或自己被调侃的时候。")
 
 
 def recent_images(group: str, keep: int = 8) -> list:
@@ -968,7 +948,7 @@ def recent_images(group: str, keep: int = 8) -> list:
 
 
 def mark_image_sent(group: str, path) -> None:
-    """记下刚发过的图，下一轮提示词里标 ★，让模型换一张。"""
+    """记下刚发过的图，选图时跳过，避免连着用同一张。"""
     try:
         row = MEMORY.image_by_path(path)
         if not row:
@@ -981,16 +961,20 @@ def mark_image_sent(group: str, path) -> None:
         log.warning("记录发过的图失败 group=%s", group[:8], exc_info=True)
 
 
-def image_library_hint(group: str = "", limit=40) -> str:
-    """把图库描述 + 适用范围给模型，作为选图与改范围的依据。
+def image_library_hint(group: str = "") -> str:
+    """只给一句「图库有多少、怎么用」，不再逐张列描述（v0.68 改成真检索）。
 
-    只列有 scope 的图（自己标过来源/画风的）。limit 要给够：2026-11-07 之前是
-    limit=12 + ts DESC，只有最后导入的 12 张能进提示词，另一半（开心/日常）
-    永远发不出来，群里才会「翻来覆去就这几张」。
+    2026-11-07 查出来：以前把 12（后来 25）张的描述全列进提示词，模型 237 次配图里
+    [[img-search:]] 只用了 4 次，其余全是抄菜单原文——检索只负责「按名字取图」，
+    选择根本没发生。现在清单撤掉，模型按眼前场景自己写 query，embedding 全库检索。
     """
-    rows = MEMORY.image_library(limit)
-    recent = recent_images(group) if group else ()
-    return format_image_library(rows, recent)
+    n = MEMORY.curated_image_count()
+    if not n:
+        return ""
+    return (f"图库：{n} 张大肥鱼表情包（情绪、日常、吐槽都有）。想配图就写 "
+            "[[img-search:你自己的一句话]]——描述眼前这件事或这个情绪，别写图片名、"
+            "也别猜哈希；系统会按语义从全库检索最像的一张，没有合适的就不发。"
+            "写得越像眼前这事，检索越准。")
 
 
 OTHER_GROUP_HINTS = ("另一个群", "其他群", "别的群", "那个群", "新群", "二群",
@@ -1111,11 +1095,11 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
         )
     tail = (
         split_line
-        + "想附带一张表情包，就另起一行写 [[img:一句话描述]]（例如 [[img:震惊脸]]、"
-        "[[img:竖大拇指]]），系统会去图库里找最像的那张；找不到就不发图，别编哈希。\n"
-        "想按情绪/场景搜图，就写 [[img-search:描述或情绪]]（例如 [[img-search:摸鱼]]）；"
-        "系统会搜索图库并发出最像的一张。这不是外部工具，不需要审批，也不要说“我没有搜索工具”。\n"
-        "选图前先看上面的适用范围；用户说「错误发图」或解释某张图的用法时，"
+        + "想附带一张表情包，就另起一行写 [[img-search:一句话]]——描述眼前这件事或这个情绪"
+        "（例如 [[img-search:被夸了有点飘]]、[[img-search:困得睁不开眼]]、[[img-search:他说了个离谱的]]），"
+        "系统会去图库里按语义搜最像的一张；找不到就不发图，别编哈希、也别写图片名。"
+        "这不是外部工具，不需要审批，也不要说“我没有搜索工具”。\n"
+        "用户说「错误发图」或解释某张图的用法时，"
         "可以另起一行写 [[img-scope:图的一句话描述|适用范围]] 更新图库，这条不会发出去。"
     )
     lib = image_library_hint(group)
@@ -1153,13 +1137,25 @@ def collect_prompt_images(fresh) -> list[tuple[str, bytes]]:
     return payloads
 
 
-async def store_embedding(h: str, desc: str):
+def image_embed_text(desc: str, use_when: str = "") -> str:
+    """算 embedding 用的文本 = 画面描述 + 适用场合（v0.68）。
+
+    光靠一句画面描述，短句区分度太低：「请我吃顿好的」对「捧着蓝碗干饭」只有 0.42。
+    把「什么时候用」也写进去，检索才有东西可匹配。
+    """
+    d = (desc or "").strip()
+    u = (use_when or "").strip()
+    return f"{d}；适用：{u}" if u else d
+
+
+async def store_embedding(h: str, desc: str, use_when: str = ""):
     """把图片描述算成向量存起来（失败就算了，查图时还会懒补）。"""
     model = CONFIG.get("ai", "embedding_model", fallback="").strip()
-    if not desc or not model:
+    text = image_embed_text(desc, use_when)
+    if not text or not model:
         return
     vecs = await media.embed_texts(
-        [desc], CONFIG.get("ai", "base_url").strip(),
+        [text], CONFIG.get("ai", "base_url").strip(),
         CONFIG.get("ai", "api_key").strip(), model, timeout=8.0,
     )
     if vecs:
@@ -1168,7 +1164,8 @@ async def store_embedding(h: str, desc: str):
 
 async def _ensure_embeddings(rows):
     """给还没算向量的图补一批 embedding（10 条一批，接口对批量有上限）。"""
-    missing = [(h, desc) for h, _p, desc, emb in rows if emb is None and desc]
+    missing = [(h, image_embed_text(desc, use)) for h, _p, desc, emb, use in rows
+               if emb is None and desc]
     if not missing:
         return rows
     model = CONFIG.get("ai", "embedding_model", fallback="").strip()
@@ -1179,10 +1176,10 @@ async def _ensure_embeddings(rows):
     done = 0
     for start in range(0, len(missing), 10):
         chunk = missing[start:start + 10]
-        vecs = await media.embed_texts([d for _h, d in chunk], base, key, model, timeout=8.0)
+        vecs = await media.embed_texts([t for _h, t in chunk], base, key, model, timeout=8.0)
         if not vecs or len(vecs) != len(chunk):
             break  # 接口挂了就先这样，剩下的下次懒补
-        for (h, _d), v in zip(chunk, vecs):
+        for (h, _t), v in zip(chunk, vecs):
             MEMORY.set_image_emb(h, media.pack_vec(v))
         done += len(chunk)
     if done:
@@ -1190,9 +1187,13 @@ async def _ensure_embeddings(rows):
     return MEMORY.images_with_emb()
 
 
-async def match_image(query: str):
-    """按一句描述找库里最像的图，返回 (path, desc) 或 None。"""
-    rows = MEMORY.images_with_emb()
+async def match_image(query: str, exclude=()):
+    """按一句场景描述找库里最像的图，返回 (path, desc) 或 None。
+
+    exclude = 这个群最近发过的图（hash 前 8 位），直接排除，避免连着用同一张。
+    """
+    ex = set(exclude or ())
+    rows = [r for r in MEMORY.images_with_emb() if r[0][:8] not in ex]
     if not rows:
         return None
     threshold = CONFIG.getfloat("ai", "image_match_threshold", fallback=0.45)
@@ -1206,7 +1207,7 @@ async def match_image(query: str):
         )
         if vecs:
             best, best_score = None, -1.0
-            for _h, path, desc, emb in rows:
+            for _h, path, desc, emb, _use in rows:
                 if not emb:
                     continue
                 score = media.cosine(vecs[0], media.unpack_vec(emb))
@@ -1219,7 +1220,7 @@ async def match_image(query: str):
 
     # 兜底：字面二元组匹配
     best, best_score = None, -1.0
-    for _h, path, desc, _emb in rows:
+    for _h, path, desc, _emb, _use in rows:
         score = media.local_score(query, desc or "")
         if score > best_score:
             best, best_score = (path, desc), score
@@ -1245,14 +1246,14 @@ async def search_images(query: str, limit: int = 5):
             CONFIG.get("ai", "api_key").strip(), model, timeout=8.0,
         )
         if vecs:
-            for h, _path, desc, emb in rows:
+            for h, _path, desc, emb, _use in rows:
                 if not emb:
                     continue
                 score = media.cosine(vecs[0], media.unpack_vec(emb))
                 d, s = meta.get(h, (desc, ""))
                 results.append({"hash": h, "desc": d or desc or "", "scope": s or "", "score": score})
     if not results:
-        for h, _path, desc, _emb in rows:
+        for h, _path, desc, _emb, _use in rows:
             d, s = meta.get(h, (desc, ""))
             results.append({
                 "hash": h, "desc": d or desc or "", "scope": s or "",
@@ -1262,14 +1263,14 @@ async def search_images(query: str, limit: int = 5):
     return results[:limit]
 
 
-async def resolve_image(token: str):
-    """`[[img:<8位哈希>]]` 精确找；`[[img:<描述>]]` 走匹配。返回 (path, desc) 或 None。"""
+async def resolve_image(token: str, exclude=()):
+    """`[[img:<8位哈希>]]` 精确找；`[[img:<描述>]]` 走 embedding 匹配。返回 (path, desc) 或 None。"""
     t = token.strip()
     if re.fullmatch(r"[0-9a-f]{8}", t):
         row = MEMORY.find_image(t)
         if row:
             return row[0], row[1]
-    got = await match_image(t)
+    got = await match_image(t, exclude=exclude)
     if not got:
         return None
     (path, desc), score = got

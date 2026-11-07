@@ -71,6 +71,9 @@ class Memory:
             # 老图 kind 为 NULL：按"表情包"处理（它们都是当初特意收进图库的）；
             # 新图入库时由视觉模型判定，只有"表情包"进图库。
             self.conn.execute("ALTER TABLE images ADD COLUMN kind TEXT")
+        if "use_when" not in cols:
+            # 检索用：这张图适合什么场合/情绪（和 desc 一起算 embedding，见 v0.68）。
+            self.conn.execute("ALTER TABLE images ADD COLUMN use_when TEXT DEFAULT ''")
         self.conn.commit()
 
     # ---------- 消息 ----------
@@ -292,12 +295,30 @@ class Memory:
         self.conn.commit()
 
     def images_with_emb(self):
-        """[(hash, path, desc, emb_bytes_or_None), ...]，按时间正序；只含表情包。"""
+        """[(hash, path, desc, emb, use_when), ...]，按时间正序。
+
+        只返回 scope 非空的图 = 我们自己标过来源的那批（大肥鱼 24 张 + 熟人互损 1 张）。
+        群友随手发的杂图虽然 kind='表情包'，但不参与选图（画风不统一，见 v0.68）。
+        """
         rows = self.conn.execute(
-            "SELECT hash, path, desc, emb FROM images"
-            " WHERE kind IS NULL OR kind='表情包' ORDER BY ts"
+            "SELECT hash, path, desc, emb, use_when FROM images"
+            " WHERE (kind IS NULL OR kind='表情包')"
+            " AND scope IS NOT NULL AND scope != '' ORDER BY ts"
         ).fetchall()
         return rows
+
+    def curated_image_count(self):
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM images WHERE (kind IS NULL OR kind='表情包')"
+            " AND scope IS NOT NULL AND scope != ''"
+        ).fetchone()
+        return row[0] if row else 0
+
+    def set_image_use(self, h, use_when):
+        self.conn.execute(
+            "UPDATE images SET use_when=? WHERE hash=?", ((use_when or "")[:500], h)
+        )
+        self.conn.commit()
 
     def image_by_path(self, path):
         row = self.conn.execute(
