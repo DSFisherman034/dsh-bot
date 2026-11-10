@@ -290,6 +290,34 @@ class Memory:
         ).fetchone()
         return row
 
+    def find_image_by_desc(self, text):
+        """按描述原文找图：先看是不是某张图 desc 的前缀，再看是不是里面的片段。
+
+        暖场由头（material._image）会把库里的 desc 原样抄给模型，模型再原样写回
+        `[[img:<desc>]]`。这种「说的就是库里那张」的情况不该交给语义检索去猜
+        ——2026-11-10 心+滚字那张就是这么被猜成另一张蓝角黄脸的。
+        """
+        t = (text or "").strip()
+        if len(t) < 6:
+            return None
+        safe = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        row = self.conn.execute(
+            "SELECT path, desc FROM images"
+            " WHERE (kind IS NULL OR kind='表情包')"
+            " AND desc LIKE ? ESCAPE '\\' ORDER BY ts DESC LIMIT 1",
+            (safe + "%",),
+        ).fetchone()
+        if row:
+            return row
+        if len(t) >= 12:
+            row = self.conn.execute(
+                "SELECT path, desc FROM images"
+                " WHERE (kind IS NULL OR kind='表情包')"
+                " AND desc LIKE ? ESCAPE '\\' ORDER BY length(desc) ASC LIMIT 1",
+                ("%" + safe + "%",),
+            ).fetchone()
+        return row
+
     def set_image_emb(self, h, blob):
         self.conn.execute("UPDATE images SET emb=? WHERE hash=?", (blob, h))
         self.conn.commit()

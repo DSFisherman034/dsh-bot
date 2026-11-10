@@ -1264,12 +1264,20 @@ async def search_images(query: str, limit: int = 5):
 
 
 async def resolve_image(token: str, exclude=()):
-    """`[[img:<8位哈希>]]` 精确找；`[[img:<描述>]]` 走 embedding 匹配。返回 (path, desc) 或 None。"""
+    """`[[img:<8位哈希>]]` 精确找；描述是库里原文就先取那张；都不是才走 embedding 匹配。
+
+    暖场由头会把库里某张图的 desc 原样给模型，模型原样写回来——这时候不该让语义检索
+    去猜（2026-11-10 就是猜成了另一张）。返回 (path, desc) 或 None。
+    """
     t = token.strip()
     if re.fullmatch(r"[0-9a-f]{8}", t):
         row = MEMORY.find_image(t)
         if row:
             return row[0], row[1]
+    exact = MEMORY.find_image_by_desc(t)
+    if exact:
+        log.info("按描述精确找到图：%r → %s", t, (exact[1] or "")[:24])
+        return exact[0], exact[1]
     got = await match_image(t, exclude=exclude)
     if not got:
         return None

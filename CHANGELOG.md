@@ -793,3 +793,26 @@
   典型：无语 0.67、摸鱼 0.66、生气 0.66、求饶 0.60、晚安 0.53。
 - 单测 `reference/image_library_check.py` 3/3（embedding 拼接、提示词不再有菜单、记账）。
 - 改代码 + 改数据（25 张重算向量，库先备份 `data.db.bak-20261107-1730`），需要 restart。
+
+## 2026-11-10 · v0.69 暖场由头那张图，现在真能发出去了
+
+- 现象：19:13 暖场「半小时没人说话，这颗心举得手都酸了」，由头是图库里
+  「双手捧一颗红心、心上写“滚”字」那张（`ddbac015`，群友 10-30 发的，`scope` 为空）。
+  模型原样写了 `[[img:黄色圆脸表情…滚字]]`，群里发出来的却是另一张
+  「蓝角黄脸、伸手指」（`fef45aa9`，相似度 0.58）。之后两轮还接着说
+  「先说要不要这颗心」「收好，那个滚字算赠品」，心一直没发出去。
+- 根因：`material._image` 从 `image_library()`（全部表情包）挑图，给模型的是库里原文；
+  `resolve_image()` 却只把描述丢给 `match_image()`，而 v0.68 把检索池收紧到
+  「scope 非空」的 25 张 —— 群友发的图永远选不回来，只能命中池里最像的那张。
+- 改法：
+  1. `memory.find_image_by_desc()`：描述先按库里 `desc` 的前缀/片段精确找（≥6 字才试），
+     命中就直接用那张，不再 embedding；对不上才走语义。`resolve_image` 在 8 位哈希
+     精确之后接这一步。日志分开记「按描述精确找到图」/「按描述找到图（0.58）」。
+  2. `material._local()` 签名补成 `(group, memory)`：`collect()` 一直是
+     `fn(group, memory)` 调用，`_local()` 却无参，每次暖场都报
+     `TypeError('_local() takes 0 positional arguments but 2 were given')`，
+     「本机状态」这个由头自挂上起一次都没生效过。
+- 验证：拿生产库副本跑模型当时的原话 → `ddbac01523d5e91b.gif`（心+滚字）；
+  哈希 `ddbac015` 同样命中。新单测 `reference/warmup_image_check.py` 4/4
+  （由头可解析、`_local` 可调用、描述精确优先、对不上才 fallback 语义）。
+- 只改代码，需要 restart。

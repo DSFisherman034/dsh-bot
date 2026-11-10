@@ -124,8 +124,8 @@ def _image(group: str, memory) -> list[str]:
     return out
 
 
-def _local() -> list[str]:
-    """本机状态：负载、内存、磁盘、开机时长。"""
+def _local(group: str, memory) -> list[str]:
+    """本机状态：负载、内存、磁盘、开机时长。参数只为跟别的来源同签名。"""
     try:
         load = os.getloadavg()[0]
         mem_total = mem_avail = 0.0
