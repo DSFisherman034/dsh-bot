@@ -834,3 +834,18 @@
   若哪条 debug 里构造文本抛异常，会被 logging 自己吞掉（不影响发送）。
 - v0.70.1（21:15）：收到包的 `message_scene.ext` 里还有 `auth_token=...`（每条消息一个），
   原脱敏只覆盖 `Authorization: QQBot *`，补上；两类凭据现在都抹成 `***` 再落盘。
+
+## 2026-11-11 · v0.71 引用（quote）内容进上下文
+
+- 现象：00:01 书匪病玄引用鱼自己的旧句、只发「，」「@大肥鱼 ，」，
+  鱼回「悟不出来，你打两个字」。收包日志里这些是 `message_type: 103`，
+  `msg_elements[0].content` 就是被引用的原句（如「哪条错了，指出来，我认」）；
+  botsns 其实已经把它解析成 `message.quote`，但 dsh-bot 以前只拿它判断
+  「是不是在叫自己」（`is_addressed`），入库和 prompt 里只剩一个「，」。
+- 改法：`render.py` 把 `message.quote.content` 压成一行 `[引用：…]` 前缀
+  （120 字截断、换行折成空格、@ 渲染成名字），和正文一起入库；
+  `build_dsh_prompt` 的转录里就能看到被引用的上一条。私信同路径也生效。
+- 注：23:48「ai味有点重」那条，在 dsh-bot 与都报两边收包日志里都是
+  `message_type: 0`、没有 `msg_elements`，平台没下发引用；不是 dsh-bot 丢的。
+- 单测 8/8（普通消息、引用、@、长引用截断、换行、空引用、表情）。
+- 只改代码，需要 restart。

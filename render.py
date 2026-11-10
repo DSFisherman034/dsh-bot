@@ -6,6 +6,7 @@
 
 这里的策略：
 - @ 渲染成 `@名字(openid)`，保留 id，模型想 @ 谁时可以直接用；
+- 引用渲染成 `[引用：…]` 前缀（botsns 已解析成 `message.quote`，120 字截断、折成一行）；
 - 表情/图片渲染成可读占位；
 - ark 只有确认是 bilibili 才去解析，失败或非 bilibili 一律留一个 `[卡片]` 占位，绝不吞内容。
 """
@@ -22,6 +23,7 @@ IMAGE_MARK = '<faceType=6,faceId="0",ext="eyJ0ZXh0IjoiIn0=">'
 ARK_RE = re.compile(r"jump_url:\s*(\S+)")
 BILI_RE = re.compile(r"(bilibili\.com|b23\.tv)")
 BV_RE = re.compile(r"https://www\.bilibili\.com/video/([^?]+)\?")
+QUOTE_CLIP = 120
 
 
 async def render_incoming(message) -> str:
@@ -33,7 +35,30 @@ async def render_incoming(message) -> str:
 
     content = _faces(content)
     content = await _ark(content)
-    return content.strip()
+
+    # 引用（QQ 的「回复」/quote）：botsns 已经把 msg_elements[0] 解析成
+    # message.quote.content，但以前只拿它判断"是不是在叫自己"，没进上下文。
+    # 结果群里引用着说一句「，」「？」时，模型只看到标点，回「悟不出来」。
+    content = content.strip()
+    quote = _render_quote(message, names)
+    if quote:
+        content = f"{quote} {content}".strip()
+    return content
+
+
+def _render_quote(message, names: dict[str, str]) -> str:
+    """把被引用的那条消息压成一行 `[引用：…]`，没有就返回空串。"""
+    q = getattr(message, "quote", None)
+    if not q:
+        return ""
+    text = (getattr(q, "content", "") or "").strip()
+    if not text:
+        return ""
+    text = MENTION_RE.sub(lambda m: f"@{names.get(m.group(1), '某人')}", text)
+    text = " ".join(text.split())  # 折成一行，别让引用里的换行拆散转录
+    if len(text) > QUOTE_CLIP:
+        text = text[:QUOTE_CLIP] + "…"
+    return f"[引用：{text}]"
 
 
 def _faces(content: str) -> str:
