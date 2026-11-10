@@ -21,6 +21,7 @@ import sys
 import time
 import traceback
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import Request
@@ -62,13 +63,58 @@ PERMANENT_SEND_ERRORS = (
 OWNER_OPENID = "82952E5885E92B9FACA668D1CC5DF08E"  # 深海渔民（dsh-bot 视角）
 MODULE_ERROR_NOTIFIED: dict[str, float] = {}       # 同一错误 1 小时内只私信一次
 
+# ── 日志 ────────────────────────────────────────────────────────────────────
+# 两份落点：
+#   1) stdout → journal（dshbot 自己的 INFO 流程日志，跟以前一样）
+#   2) logs/dsh-bot.log → 文件，额外收 botsns 的 DEBUG（收/发消息的完整 payload：
+#      msg_id、msg_seq、原文）。botsns 只在 DEBUG 记这些，所以单独把 botsns
+#      logger 放到 DEBUG，且 propagate=False——只进文件，不刷 stdout。
+# 排查收发/msg id/seq 的问题直接看 logs/dsh-bot.log。
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_PATH = LOG_DIR / "dsh-bot.log"
+
+# botsns 的 DEBUG 会带 Authorization: QQBot <access_token>，落盘前抹掉
+_TOKEN_RE = re.compile(r"((?:QQBot|Bot)\s+)[A-Za-z0-9._~+/=-]{16,}")
+
+
+class _RedactToken(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            text = record.getMessage()
+            clean = _TOKEN_RE.sub(r"\1***", text)
+            if clean != text:
+                record.msg = clean
+                record.args = ()
+        except Exception:
+            pass
+        return True
+
+
+LOG_FORMAT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
+LOG_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+    format=LOG_FORMAT,
+    datefmt=LOG_DATEFMT,
     stream=sys.stdout,
 )
+
+_file_handler = RotatingFileHandler(
+    LOG_PATH, maxBytes=20 * 1024 * 1024, backupCount=5, encoding="utf-8"
+)
+_file_handler.setFormatter(logging.Formatter(LOG_FORMAT, LOG_DATEFMT))
+_file_handler.addFilter(_RedactToken())
+logging.getLogger().addHandler(_file_handler)
+
+_botsns_log = logging.getLogger("botsns")
+_botsns_log.setLevel(logging.DEBUG)
+_botsns_log.propagate = False   # 别让完整 payload（含 token）进 journal
+_botsns_log.addHandler(_file_handler)
+
 log = logging.getLogger("dshbot")
+log.info("日志落盘：%s", LOG_PATH)
 
 CONFIG = None
 MEMORY: Memory | None = None

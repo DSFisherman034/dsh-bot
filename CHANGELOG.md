@@ -816,3 +816,19 @@
   哈希 `ddbac015` 同样命中。新单测 `reference/warmup_image_check.py` 4/4
   （由头可解析、`_local` 可调用、描述精确优先、对不上才 fallback 语义）。
 - 只改代码，需要 restart。
+
+## 2026-11-10 · v0.70 收发日志落盘（msg_id / msg_seq / 原文）
+
+- 起因：botsns 这版加了 `logging` 日志（收包 `收到包: {payload}`、发包
+  `发送message: … payload={...}`，都含 msg_id / msg_seq / 原文），但 botsns 用的是
+  `log.debug`，dsh-bot 只 `basicConfig(level=INFO)` 且只写 stdout → 这些记录一条都没留下。
+- 改法（只动 `main.py` 启动段的 logging 配置）：
+  1. 加 `RotatingFileHandler` 写 `logs/dsh-bot.log`（20MB × 5），挂在 root 上，
+     dshbot 自己的 INFO 也进文件；
+  2. `logging.getLogger("botsns")` 单独放到 **DEBUG**、`propagate=False`、只挂文件——
+     收/发完整 payload 全落盘，但不刷 stdout/journal；
+  3. `_RedactToken` 过滤器：botsns 的 `headers` 里有 `Authorization: QQBot <access_token>`，
+     落盘前统一抹成 `QQBot ***`（别把 token 写进日志）。
+- 位置：`/opt/dsh-bot/logs/dsh-bot.log`（自动建目录；`.gitignore` 加了 `logs/`）。
+- 已知取舍：debug 级 payload 较大，靠 20MB 滚动兜住；botsns 的 DEBUG 日志只在运行时产生，
+  若哪条 debug 里构造文本抛异常，会被 logging 自己吞掉（不影响发送）。

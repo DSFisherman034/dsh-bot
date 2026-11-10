@@ -93,7 +93,12 @@ systemctl status dsh-bot
 journalctl -u dsh-bot -f                 # 看它每次说话/沉默的决策
 curl -s localhost:3704/health
 curl -s localhost:3704/stats             # 库里消息数/群数
+tail -f /opt/dsh-bot/logs/dsh-bot.log    # 收发原始记录（含 msg_id / msg_seq / 原文）
 ```
+
+`logs/dsh-bot.log` 同时收 dshbot 的 INFO 和 botsns 的 DEBUG（收发消息的完整 payload，
+收的发的都在），20MB 滚动、留 5 份；botsns 的 `Authorization` token 落盘前会抹成 `***`。
+排查「消息 id/seq 不对、发没发出去、收到的是哪条」直接看这个文件。
 
 改代码后的部署（**工作区里的 `~/dsh/dsh-bot` 是源码副本**）：
 

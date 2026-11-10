@@ -6,6 +6,7 @@ data.db
 data.db-*
 *.db
 images/
+logs/
 
 # Python
 __pycache__/
