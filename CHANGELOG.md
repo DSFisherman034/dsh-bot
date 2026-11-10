@@ -832,3 +832,5 @@
 - 位置：`/opt/dsh-bot/logs/dsh-bot.log`（自动建目录；`.gitignore` 加了 `logs/`）。
 - 已知取舍：debug 级 payload 较大，靠 20MB 滚动兜住；botsns 的 DEBUG 日志只在运行时产生，
   若哪条 debug 里构造文本抛异常，会被 logging 自己吞掉（不影响发送）。
+- v0.70.1（21:15）：收到包的 `message_scene.ext` 里还有 `auth_token=...`（每条消息一个），
+  原脱敏只覆盖 `Authorization: QQBot *`，补上；两类凭据现在都抹成 `***` 再落盘。

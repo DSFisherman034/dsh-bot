@@ -74,15 +74,19 @@ LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_PATH = LOG_DIR / "dsh-bot.log"
 
-# botsns 的 DEBUG 会带 Authorization: QQBot <access_token>，落盘前抹掉
-_TOKEN_RE = re.compile(r"((?:QQBot|Bot)\s+)[A-Za-z0-9._~+/=-]{16,}")
+# botsns 的 DEBUG 带两类凭据：Authorization: QQBot <access_token>，
+# 以及收到包里的 auth_token=...（每条消息一个），落盘前都抹掉
+_TOKEN_RE = re.compile(
+    r"((?:QQBot|Bot)\s+)[A-Za-z0-9._~+/=-]{16,}"
+    r"|(auth_token=)[A-Za-z0-9._~+/=-]{16,}"
+)
 
 
 class _RedactToken(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             text = record.getMessage()
-            clean = _TOKEN_RE.sub(r"\1***", text)
+            clean = _TOKEN_RE.sub(lambda m: (m.group(1) or m.group(2)) + "***", text)
             if clean != text:
                 record.msg = clean
                 record.args = ()
