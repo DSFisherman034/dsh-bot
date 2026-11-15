@@ -849,3 +849,37 @@
   `message_type: 0`、没有 `msg_elements`，平台没下发引用；不是 dsh-bot 丢的。
 - 单测 8/8（普通消息、引用、@、长引用截断、换行、空引用、表情）。
 - 只改代码，需要 restart。
+
+## 2026-11-14 · v0.72 引用图片消息：补出「谁的图、画了什么」，不再当成在问自己
+
+- 现象：08:36:38 深海渔民引用 Silverbird 的截图（02:22 那条手机设置界面），只写一句
+  「你强开了吗」。鱼回「我哪来的号，纯靠嘴说」——它以为这句在问自己。
+  会话里的 prompt 实锤：转录只有 `[08:36] 深海渔民: 你强开了吗`，引用整块没进上下文。
+- 根因：botsns 的 `_GroupMessageTemplate` 只带 `quote.id` / `quote.content`；
+  **图片消息的 content 是空串**（图在 `msg_elements[0].attachments` 里），
+  v0.71 的 `_render_quote` 见到空 content 直接 `return ""`，引用就消失了。
+  只剩一句问话 + 「最后一条在问你，必须回」（`_looks_like_followup` 看「吗」就判 followup）。
+- 改法：
+  1. `rawhook.py`（新）：纯 ASGI 中间件旁路抄一份 webhook body（不改下游读法），
+     按 `d["id"]` 暂存最近 64 条；`take()` / `quoted_attachments()` 取出被引用那条的附件。
+     `main()` 里 `CLIENT.app.app.add_middleware(rawhook.Capture)`。
+  2. `main.quote_prefix()`：引用的是图片就把原图下下来（`media.download`，按 sha256 哈希复用
+     图库描述，见过的图不再调视觉模型），再按 `h=xxxxxxxx` 反查 `messages` 里谁发过这张图
+     （`memory.author_of_image`），渲染成 `[引用：Silverbird 发的图：手机系统设置界面…]`。
+     拿不到原包/下载失败/不是图片 → 返回 None，退回占位，绝不丢消息。
+  3. `render._render_quote()`：quote 有 id 但 content 为空时留
+     `[引用：一条没有文字的消息（图片/文件之类）]`，不再整块消失；引用里的 `<faceType=1>`
+     也压成 `[表情:x]`；`render_incoming(..., quote_text=)` 支持调用方传入算好的引用块。
+  4. `_looks_like_followup()`：引用块是**别人**发的图（`[引用：X 发的图…]`，X 不是我）
+     就不算「在接我的话」，不再强制必须回；引用我自己的图照旧算。
+     作者查不到时渲染成「一张图」，不认——宁可照旧，别装死。
+- 验证：真实收包回放（`tmp/quote_replay.py`，原始包取自 v0.70 的日志，data.db 拷到 tmp 只读）
+  → `[引用：Silverbird 发的图：手机系统设置界面，显示ChatGPT扩展功能已开启…] 你强开了吗`，
+  `_looks_like_followup` 判 False（那一刻鱼 15 秒前刚说过话，这轮走冷却直接不开口）。
+  单测 `reference/quote_media_check.py` 28/28（空引用占位、文字引用回归、rawhook 透传/淘汰、
+  作者解析、followup 判据、quote_prefix 各分支）；`image_library_check` / `meta_leak_check` /
+  `source_strip_check` / `botsns_errors_check` 无回归（`drift_prompt_check` 是历史存档，预期 FAIL）。
+- 取舍：引用图片会多一次下载（~200KB），描述见过的图不重算；作者只在 7 天流水的
+  `messages` 里查，查不到只说「一张图」。引用里的图片**不会**作为 image block 交给 DSH
+  （只给文字描述），要真看图再加 `|h=` 标记。
+- 只改代码，需要 restart；`rawhook.py` 要一起 install（README 已补）。

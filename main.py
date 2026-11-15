@@ -32,9 +32,10 @@ from qqbot.botsns import QQClient, QQCallbacks  # noqa: E402
 from qqbot.botsns.QQClient import exceptions as qqexc  # noqa: E402
 
 from brain import Brain  # noqa: E402
-from render import render_incoming  # noqa: E402
+from render import QUOTE_CLIP, quoted_author, render_incoming  # noqa: E402
 import material  # noqa: E402
 import media  # noqa: E402
+import rawhook  # noqa: E402
 from dshbridge import DshBridge  # noqa: E402
 from memory import Memory  # noqa: E402
 from textfix import strip_meta_leak, strip_sources  # noqa: E402
@@ -165,6 +166,66 @@ def split_bubbles(text: str, limit: int) -> list[str]:
 
 
 
+async def describe_image(h: str, path: Path) -> tuple[str, str]:
+    """图库里已有描述就复用，没有就现看一次；返回 (类别, 描述)。"""
+    row = MEMORY.get_image(h)
+    if row and row[2]:
+        return ((row[3] if len(row) > 3 else None) or "表情包"), row[2]   # 老图按表情包算
+    # 先分类再入库：只有"表情包"进图库，截图/广告/照片只留文件和描述给当轮上下文
+    kind, desc = await media.analyze(
+        path,
+        CONFIG.get("ai", "base_url").strip(),
+        CONFIG.get("ai", "api_key").strip(),
+        CONFIG.get("ai", "vision_model", fallback="qwen3.7-flash").strip(),
+        limit=CONFIG.getint("ai", "vision_desc_chars", fallback=media.MAX_DESC),
+        edge=CONFIG.getint("ai", "image_max_edge", fallback=media.DEFAULT_EDGE),
+    )
+    MEMORY.put_image(h, path, desc, kind)
+    if kind == "表情包" and desc:
+        # 向量后台算，别把消息入库卡住
+        asyncio.create_task(store_embedding(h, desc))
+    else:
+        log.info("图片不入表情包库（%s）：%s", kind, (desc or "")[:40])
+    return kind, desc
+
+
+async def quote_prefix(message, group: str) -> str | None:
+    """被引用的图片消息：补成 `[引用：谁的图：画了什么]`，拿不到就返回 None。
+
+    botsns 的 quote 只有 id/content；图片消息的 content 是空的，附件在原始包里
+    （rawhook.py 抄了一份）。原图下下来按哈希复用图库描述，再按哈希反查是谁发的——
+    模型看到「Silverbird 发的图：手机系统设置…」就不会把「你强开了吗」当成问自己。
+    """
+    quote = getattr(message, "quote", None)
+    if not quote or not getattr(quote, "id", None):
+        return None
+    raw = rawhook.take(message.id)
+    if (getattr(quote, "content", "") or "").strip():
+        return None                     # 有文字：文本引用交给 render，不折腾
+    try:
+        for att in rawhook.quoted_attachments(raw, quote.id):
+            ctype = (att.get("content_type") or "").lower()
+            if ctype and not ctype.startswith("image/"):
+                continue
+            got = await media.download(att["url"], IMAGES_DIR)
+            if not got:
+                continue
+            h, path = got
+            kind, desc = await describe_image(h, path)
+            desc = " ".join((desc or "").split())
+            if len(desc) > QUOTE_CLIP:
+                desc = desc[:QUOTE_CLIP] + "…"
+            author = MEMORY.author_of_image(group, h[:8])
+            log.info("引用图片 %s：%s h=%s（%s）", "已知作者" if author else "作者未知",
+                     author or "?", h[:8], kind)
+            who = f"{author} 发的图" if author else "一张图"
+            return f"[引用：{who}{'：' + desc if desc else ''}]"
+    except Exception:
+        # 引用补不出来就退回占位，别把整条消息搞丢
+        log.exception("解析引用图片失败，退回占位")
+    return None
+
+
 async def enrich_attachments(message, content: str) -> str:
     """把附件里的图片变成一句描述塞进消息，带短哈希，方便模型复用（表情包）。
 
@@ -182,26 +243,7 @@ async def enrich_attachments(message, content: str) -> str:
             marks.append("[图]")
             continue
         h, path = got
-        row = MEMORY.get_image(h)
-        if row and row[2]:
-            desc = row[2]            # 同一张图只描述一次，省 token
-            kind = (row[3] if len(row) > 3 else None) or "表情包"   # 老图按表情包算
-        else:
-            # 先分类再入库：只有"表情包"进图库，截图/广告/照片只留文件和描述给当轮上下文
-            kind, desc = await media.analyze(
-                path,
-                CONFIG.get("ai", "base_url").strip(),
-                CONFIG.get("ai", "api_key").strip(),
-                CONFIG.get("ai", "vision_model", fallback="qwen3.7-flash").strip(),
-                limit=CONFIG.getint("ai", "vision_desc_chars", fallback=media.MAX_DESC),
-                edge=CONFIG.getint("ai", "image_max_edge", fallback=media.DEFAULT_EDGE),
-            )
-            MEMORY.put_image(h, path, desc, kind)
-            if kind == "表情包" and desc:
-                # 向量后台算，别把消息入库卡住
-                asyncio.create_task(store_embedding(h, desc))
-            else:
-                log.info("图片不入表情包库（%s）：%s", kind, (desc or "")[:40])
+        _kind, desc = await describe_image(h, path)
         short = h[:8]
         marks.append(f"[图:{desc}|h={short}]" if desc else f"[图|h={short}]")
     if not marks:
@@ -276,7 +318,8 @@ async def handle_group(message, addressed: bool):
     group = message.group_openid
     try:
         is_bot_author = bool(message.author.is_bot)
-        content = await render_incoming(message)
+        # 引用别人的图：先把原图找回来，补一句「谁的图、画了什么」，再渲染
+        content = await render_incoming(message, quote_text=await quote_prefix(message, group))
         content = await enrich_attachments(message, content)
         MEMORY.add_message(
             group, message.id, message.author.username, message.author.openid,
@@ -306,7 +349,10 @@ async def handle_dc(message):
             return
         MEMORY.add_message(
             group, message.id, message.author.username, message.author.openid,
-            await enrich_attachments(message, await render_incoming(message)),
+            await enrich_attachments(
+                message,
+                await render_incoming(message, quote_text=await quote_prefix(message, group)),
+            ),
             is_bot=False, ts=_ts(message.timestamp),
         )
         rows = MEMORY.recent_messages(group)
@@ -426,6 +472,16 @@ def _addressed_to_others(text: str) -> bool:
     return False
 
 
+def _quotes_someone_else(text: str) -> bool:
+    """引用块是不是别人发的图（不是我们自己的图）。
+
+    引用别人的图再问一句，多半是在跟图的主人说话，不是在接我们的话。
+    作者查不到时渲染成「一张图」，这里不认——宁可照旧当 followup，别装死。
+    """
+    author = quoted_author(text)
+    return bool(author) and author not in SELF_NAMES
+
+
 def _looks_like_followup(rows, last_bot_ts) -> bool:
     """最后一条是不是在接你的话/问你。"""
     if not last_bot_ts or time.time() - last_bot_ts >= 180:
@@ -434,6 +490,8 @@ def _looks_like_followup(rows, last_bot_ts) -> bool:
     if not last_other:
         return False
     content = last_other[1] or ""
+    if _quotes_someone_else(content):
+        return False
     return any(k in content for k in (
         "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
         "是不是", "能不能", "有没有", "吗",
@@ -1834,6 +1892,10 @@ async def main():
     @CLIENT.app.app.get("/stats")
     async def stats():
         return MEMORY.stats()
+
+    # webhook 的原文再抄一份：botsns 的模板只带 quote.id/content，
+    # 被引用的图片（content 为空）附件在原始包里，靠这个才能补出「谁的图、画了什么」。
+    CLIENT.app.app.add_middleware(rawhook.Capture)
 
     log.info("DSH Bot 启动 appid=%s %s:%s model=%s", appid, host, port, BRAIN.model)
     asyncio.create_task(start_bridge())

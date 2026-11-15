@@ -7,6 +7,8 @@
 这里的策略：
 - @ 渲染成 `@名字(openid)`，保留 id，模型想 @ 谁时可以直接用；
 - 引用渲染成 `[引用：…]` 前缀（botsns 已解析成 `message.quote`，120 字截断、折成一行）；
+  引用的是图片时 botsns 只给出空 content、附件在原始包里，调用方（main.quote_prefix）
+  可以算好引用块用 `quote_text=` 传进来，这里只负责拼；
 - 表情/图片渲染成可读占位；
 - ark 只有确认是 bilibili 才去解析，失败或非 bilibili 一律留一个 `[卡片]` 占位，绝不吞内容。
 """
@@ -24,10 +26,19 @@ ARK_RE = re.compile(r"jump_url:\s*(\S+)")
 BILI_RE = re.compile(r"(bilibili\.com|b23\.tv)")
 BV_RE = re.compile(r"https://www\.bilibili\.com/video/([^?]+)\?")
 QUOTE_CLIP = 120
+# 引用的是图片/文件时 content 是空的：至少让模型知道「他在回复某条消息」，
+# 别只看到一句「你强开了吗」就以为在问自己（2026-11-14 08:36 实例）。
+QUOTE_MEDIA_PLACEHOLDER = "[引用：一条没有文字的消息（图片/文件之类）]"
+# main.quote_prefix 补出来的格式：`[引用：Silverbird 发的图：手机屏幕截图…]`
+QUOTE_AUTHOR_RE = re.compile(r"^\[引用：(.{1,40}?) 发的图")
 
 
-async def render_incoming(message) -> str:
-    """把一条入站消息渲染成给模型看的文本。"""
+async def render_incoming(message, quote_text: str | None = None) -> str:
+    """把一条入站消息渲染成给模型看的文本。
+
+    quote_text：调用方已经算好的引用块（被引用的图片得看原图才知道画了什么，
+    botsns 的模板里没有附件，main.py 用 rawhook 补），给了就不再看 message.quote。
+    """
     content = message.content or ""
 
     names = {m.openid: m.username for m in (getattr(message, "mentions", None) or [])}
@@ -40,7 +51,7 @@ async def render_incoming(message) -> str:
     # message.quote.content，但以前只拿它判断"是不是在叫自己"，没进上下文。
     # 结果群里引用着说一句「，」「？」时，模型只看到标点，回「悟不出来」。
     content = content.strip()
-    quote = _render_quote(message, names)
+    quote = quote_text if quote_text is not None else _render_quote(message, names)
     if quote:
         content = f"{quote} {content}".strip()
     return content
@@ -53,12 +64,22 @@ def _render_quote(message, names: dict[str, str]) -> str:
         return ""
     text = (getattr(q, "content", "") or "").strip()
     if not text:
-        return ""
+        # 图片/文件消息的 content 就是空串（图在 msg_elements[0].attachments 里）。
+        # 但 quote.id 有值说明确实引用了某条消息——整块丢掉的话，
+        # 模型只会看到「你强开了吗」，会把「你」当成自己。
+        return QUOTE_MEDIA_PLACEHOLDER if getattr(q, "id", None) else ""
+    text = _faces(text)
     text = MENTION_RE.sub(lambda m: f"@{names.get(m.group(1), '某人')}", text)
     text = " ".join(text.split())  # 折成一行，别让引用里的换行拆散转录
     if len(text) > QUOTE_CLIP:
         text = text[:QUOTE_CLIP] + "…"
     return f"[引用：{text}]"
+
+
+def quoted_author(text: str) -> str:
+    """引用块是不是「某人 发的图」，是就返回那个人，不是返回空串。"""
+    m = QUOTE_AUTHOR_RE.match((text or "").lstrip())
+    return m.group(1).strip() if m else ""
 
 
 def _faces(content: str) -> str:

@@ -104,7 +104,7 @@ tail -f /opt/dsh-bot/logs/dsh-bot.log    # 收发原始记录（含 msg_id / msg
 
 ```bash
 cd ~/dsh/dsh-bot
-sudo install -o dsfisherman -g dsfisherman -m 644 main.py brain.py memory.py textfix.py material.py media.py dshbridge.py render.py persona.md README.md CHANGELOG.md /opt/dsh-bot/
+sudo install -o dsfisherman -g dsfisherman -m 644 main.py brain.py memory.py textfix.py material.py media.py dshbridge.py render.py rawhook.py persona.md README.md CHANGELOG.md /opt/dsh-bot/
 sudo install -o dsfisherman -g dsfisherman -m 600 config.ini /opt/dsh-bot/config.ini
 sudo install -o dsfisherman -g dsfisherman -m 600 agent/AGENTS.md /opt/dsh-bot/agent/AGENTS.md
 sudo systemctl restart dsh-bot

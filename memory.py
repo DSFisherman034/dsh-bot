@@ -284,6 +284,21 @@ class Memory:
         """[(hash, path, kind), ...] 全量，给回填分类用。"""
         return self.conn.execute("SELECT hash, path, kind FROM images ORDER BY ts").fetchall()
 
+    def author_of_image(self, group, short):
+        """哪条消息带过这张图（content 里有 `h=xxxxxxxx`）→ 作者名。
+
+        给「引用的是谁的图」用：引用图片时 botsns 不给附件，靠图和原消息对上。
+        只查 7 天内的流水（prune 之后老图可能已经没了，忍）。
+        """
+        if not group or not short:
+            return ""
+        row = self.conn.execute(
+            "SELECT author FROM messages WHERE group_openid=? AND content LIKE ?"
+            " ORDER BY ts DESC, id DESC LIMIT 1",
+            (group, f"%h={short}%"),
+        ).fetchone()
+        return (row[0] if row else "") or ""
+
     def find_image(self, prefix):
         row = self.conn.execute(
             "SELECT path, desc FROM images WHERE hash LIKE ? LIMIT 1", (prefix + "%",)
