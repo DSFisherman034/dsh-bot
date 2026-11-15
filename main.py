@@ -482,6 +482,12 @@ def _quotes_someone_else(text: str) -> bool:
     return bool(author) and author not in SELF_NAMES
 
 
+def _last_bot_asked(rows) -> bool:
+    """自己上一句是不是个问句（「对」这种应声多半是在答它，不是在自言自语）。"""
+    last_bot = next((r for r in reversed(rows) if r[3]), None)
+    return bool(last_bot) and any(k in (last_bot[1] or "") for k in QUESTION_WORDS)
+
+
 def _looks_like_followup(rows, last_bot_ts) -> bool:
     """最后一条是不是在接你的话/问你。"""
     if not last_bot_ts or time.time() - last_bot_ts >= 180:
@@ -492,6 +498,9 @@ def _looks_like_followup(rows, last_bot_ts) -> bool:
     content = last_other[1] or ""
     if _quotes_someone_else(content):
         return False
+    # 「对」「嗯」「？」这种：如果你上一句是在问，那它就是在答你——别用冷却挡掉，也别不理。
+    if _is_bare_ack(content) or _is_punct_only(content):
+        return _last_bot_asked(rows)
     return any(k in content for k in (
         "?", "？", "什么", "怎么", "为什么", "哪", "谁", "多少",
         "是不是", "能不能", "有没有", "吗",
@@ -1050,6 +1059,12 @@ def _is_bare_ack(text: str) -> bool:
     return bool(t) and len(t) <= 4 and t in ACK_WORDS
 
 
+def _is_punct_only(text: str) -> bool:
+    """只剩问号/标点（「？」「？？」这种）：不是应声，但同样没内容。"""
+    t = _plain_message(text).strip()
+    return bool(t) and all(ch in "?？!！。…~～" for ch in t)
+
+
 def weight_hint(group: str, fresh=None) -> str:
     """这轮该回多少：对方给多少，你就回多少（v0.73）。
 
@@ -1069,14 +1084,12 @@ def weight_hint(group: str, fresh=None) -> str:
         return ("分量：对方这句只是应了一声，没有新信息。你最多回三四个字——"
                 "「对」「嗯」「哦」「？」「草」这种，或者 SKIP；不要加观察、不要反问原因、"
                 "不要演情绪、不要解释，也别把它当成可以发挥的段子。")
-    raw = plain.strip()
-    has_media = bool(re.search(r"\[(图|图片|卡片|文件|表情|语音|视频)", text or ""))
-    if has_media and not squeezed:
-        return ("分量：对方只发了图/卡片，没说话。你看着接一句短的，或者 SKIP；"
-                "别硬从图里解读出一大段东西。")
-    if raw and all(ch in "?？!！。…~～" for ch in raw):
+    if _is_punct_only(text):
         return ("分量：对方只丢了一个问号/标点。你回一个「？」或者一句很短的反问就够了，"
                 "不要长篇解释；没把握就 SKIP。")
+    if not squeezed:
+        return ("分量：对方这条没有文字（引用/图片/卡片之类）。要接就一句短的，看上下文接；"
+                "别硬从图里或引用里解读出一大段东西。")
     if any(k in plain for k in QUESTION_WORDS):
         return ("分量：对方在问你，正常答，答案要给全；答完就停，别顺手补一段科普、总结或新话题。")
     if 0 < len(squeezed) <= 12:
