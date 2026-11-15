@@ -528,7 +528,7 @@ def ambient_instruction(group: str) -> str:
     if _looks_like_followup(rows, last[1] if last else 0):
         return (
             "最后一条明显是在接你刚才的话、或者在问你，**必须回**，不要 SKIP。"
-            "顺着对方的问题答，别装死。\n" + hint
+            "顺着对方的问题答，别装死；答完就停，不要顺手再补一段。\n" + hint
         )
 
     last_other = next((r for r in reversed(rows) if not r[3]), None)
@@ -536,7 +536,7 @@ def ambient_instruction(group: str) -> str:
     if last_other and _addressed_to_others(last_other[1]):
         return (
             f"最后一条是 {who} 在 @ 别人，不是对你说的。"
-            "除非你能补一句真正有用的信息，否则输出 SKIP。\n" + hint
+            "除非你确实想接（接梗、接情绪、真知道答案），否则输出 SKIP。\n" + hint
         )
 
     # 上一条是另一个 bot 刚说的、最后一条是短句 → 多半是在跟那个 bot 打招呼/回它
@@ -554,7 +554,8 @@ def ambient_instruction(group: str) -> str:
     return (
         f"没人 @ 你。先判断最后一条（{who} 说的）是不是在跟你说："
         "如果是在跟别人说话、或者在接别人的话，就输出 SKIP。"
-        "只有你能补一句真正有用或好笑的，或者对方明显在等你，才接；不确定就 SKIP。\n" + hint
+        "只有你确实想接（有情绪要接、有梗要接、真知道答案）才接；只是想补充信息、点评、总结，就 SKIP。"
+        "对方只是应了一声、或者话说完了，SKIP 或者只跟一句同样短的话都行。不确定就 SKIP。\n" + hint
     )
 
 
@@ -1020,6 +1021,71 @@ def group_allows_proactive(group: str) -> bool:
     return True
 
 
+ACK_WORDS = {
+    "对", "对的", "对啊", "对呀", "嗯", "嗯嗯", "哦", "噢", "喔", "好", "好嘞", "好耶",
+    "行", "是", "是的", "确实", "可以", "草", "6", "666", "ok",
+}
+# 问句的朴素判据：带这些就按「要回答」处理，别为了省字把答案省掉。
+QUESTION_WORDS = ("?", "？", "吗", "怎么", "为什么", "为啥", "哪", "谁", "多少", "几个",
+                  "是不是", "能不能", "有没有", "要不要", "会不会")
+
+
+def _squeeze(text: str) -> str:
+    """去空白和标点，只留字面：判断「只是应了一声」用。"""
+    return re.sub(r"[\s，。！？、,.!?…~～:：;；\"'“”‘’（）()\[\]【】<>《》]+", "", text or "")
+
+
+def _plain_message(text: str) -> str:
+    """剥掉渲染标记（[图:…]、@某人(openid)、[引用:…]），只看人说的话。"""
+    t = re.sub(r"\[[^\[\]]{0,400}\]", " ", text or "")
+    t = AT_TARGET_RE.sub(" ", t)
+    return t.strip()
+
+
+def _is_bare_ack(text: str) -> bool:
+    """这条是不是只是「对 / 嗯 / 哦 / 草 / 6」这种应声。带图/附件的整条不算。"""
+    if "[图:" in (text or "") or IMG_HASH_RE.search(text or ""):
+        return False
+    t = _squeeze(_plain_message(text)).lower()
+    return bool(t) and len(t) <= 4 and t in ACK_WORDS
+
+
+def weight_hint(group: str, fresh=None) -> str:
+    """这轮该回多少：对方给多少，你就回多少（v0.73）。
+
+    起因：2026-11-15 16:27 连发两个「对」，bot 回了「隔俩小时就回我一个对，本鱼尾巴都垂了」
+    「这回倒快，可惜还是一个对」——每句都要递进出一层观察/情绪，像在表演。
+    这里只给「分量」，不限制内容对错；问句照常答全。
+    """
+    row = next((r for r in reversed(fresh or []) if not r[3]), None)
+    if row is None:
+        # 暖场/私信/没有新消息的轮次不套分量：那时没有"对方这句话"，别拿半小时前的旧话压自己。
+        return ""
+    text = (row[1] or "") if row else ""
+    plain = _plain_message(text)
+    squeezed = _squeeze(plain)
+
+    if _is_bare_ack(text):
+        return ("分量：对方这句只是应了一声，没有新信息。你最多回三四个字——"
+                "「对」「嗯」「哦」「？」「草」这种，或者 SKIP；不要加观察、不要反问原因、"
+                "不要演情绪、不要解释，也别把它当成可以发挥的段子。")
+    raw = plain.strip()
+    has_media = bool(re.search(r"\[(图|图片|卡片|文件|表情|语音|视频)", text or ""))
+    if has_media and not squeezed:
+        return ("分量：对方只发了图/卡片，没说话。你看着接一句短的，或者 SKIP；"
+                "别硬从图里解读出一大段东西。")
+    if raw and all(ch in "?？!！。…~～" for ch in raw):
+        return ("分量：对方只丢了一个问号/标点。你回一个「？」或者一句很短的反问就够了，"
+                "不要长篇解释；没把握就 SKIP。")
+    if any(k in plain for k in QUESTION_WORDS):
+        return ("分量：对方在问你，正常答，答案要给全；答完就停，别顺手补一段科普、总结或新话题。")
+    if 0 < len(squeezed) <= 12:
+        return ("分量：对方就半句话。你也半句，接住就行——不补充、不追问、不总结、不往深里讲。")
+    if len(squeezed) <= 40:
+        return ("分量：对方一句话，你也一句话。挑最想接的那个点说，不用面面俱到。")
+    return ("分量：对方说了不少，正常接；不用每条都答满，接住最想接的一句就行。")
+
+
 def bubble_hint(group: str) -> str:
     """防止永远只发一条：最近连续单条就推一把，最近拆太多就收一收。"""
     if not group_allows_proactive(group):
@@ -1213,7 +1279,8 @@ def build_dsh_prompt(group: str, instruction: str, who: str = "", message=None,
     lib = image_library_hint(group)
     lib_block = (lib + "\n\n") if lib else ""
     return (
-        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n{meme_budget_hint(group)}\n\n"
+        f"{now_line}{sum_block}{mem_block}{head}\n\n{cross_block}{cut_block}{instruction}\n\n"
+        f"{weight_hint(group, fresh)}\n\n{meme_budget_hint(group)}\n\n"
         f"{bubble_hint(group)}\n\n{image_hint(group)}\n\n{lib_block}{tail}"
     )
 
